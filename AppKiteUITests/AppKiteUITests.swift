@@ -8,36 +8,34 @@
 import XCTest
 
 final class AppKiteUITests: XCTestCase {
-
-    override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
+    @MainActor
+    func testMenuBarLaunchQuitAndRelaunch() {
         continueAfterFailure = false
 
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
-    }
-
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
-    }
-
-    @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
         let app = XCUIApplication()
         app.launch()
-
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
-    }
-
-    @MainActor
-    func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
         }
+
+        let statusItem = app.statusItems.firstMatch
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.statusItems.count, 1)
+        XCTAssertFalse(app.windows.firstMatch.exists)
+        statusItem.click()
+
+        let quit = statusItem.menuItems["Quitter AppKite"]
+        XCTAssertTrue(quit.waitForExistence(timeout: 5))
+        XCTAssertEqual(statusItem.menuItems.count, 1)
+        quit.click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+
+        app.launch()
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.statusItems.count, 1)
+        statusItem.click()
+        XCTAssertTrue(quit.waitForExistence(timeout: 5))
     }
 }

@@ -5,14 +5,11 @@
 //  Created by Yanis HARRAT on 07/11/2026.
 //
 
+import Foundation
 import Testing
 
 struct AppKiteTests {
-
-    @Test func example() async throws {
-        // Write your test here and use APIs like `#expect(...)` to check expected conditions.
-        // Swift Testing Documentation
-        // https://developer.apple.com/documentation/testing
+    @Test func hostAppIsMenuBarOnly() {
+        #expect(Bundle.main.object(forInfoDictionaryKey: "LSUIElement") as? Bool == true)
     }
-
 }
