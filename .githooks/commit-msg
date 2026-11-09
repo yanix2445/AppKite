@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+# Merge commits mark the PR boundary and use Git’s merge message.
+if [ "${1##*/}" = MERGE_MSG ] || git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then
+    exit 0
+fi
+
+message=$(git stripspace --strip-comments < "$1")
+
+printf '%s\n' "$message" | awk '
+function reject(reason) {
+    print "AppKite commit-msg: " reason > "/dev/stderr"
+    invalid = 1
+    exit 1
+}
+
+NR == 1 {
+    if (!match($0, /^(feat|fix|docs|refactor|perf|test|chore|style|ci|revert)(\([^()]*[^()[:space:]][^()]*\))?!?: /)) {
+        reject("use type(scope): description, for example fix(menu-bar): restore the settings shortcut")
+    }
+    description = substr($0, RLENGTH + 1)
+    if (description !~ /^[^[:space:]]/ || description ~ /[[:upper:]]|\.$/ || length(description) > 72) {
+        reject("write a lowercase description of up to 72 characters without a final period")
+    }
+    breaking = substr($0, RLENGTH - 2, 1) == "!"
+}
+
+NR == 2 && $0 != "" {
+    reject("separate the title and the body or footers with a blank line")
+}
+
+NR > 2 && /^BREAKING[ -]CHANGE:/ {
+    if ($0 !~ /^BREAKING CHANGE: [[:blank:]]*[^[:space:]]/) {
+        reject("use BREAKING CHANGE: followed by the impact of the change")
+    }
+    breaking_footer = 1
+}
+
+END {
+    if (!invalid && breaking && !breaking_footer) {
+        reject("add a BREAKING CHANGE: footer when the title uses !")
+    }
+}
+'
