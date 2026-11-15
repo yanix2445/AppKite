@@ -10,12 +10,23 @@ import SwiftUI
 
 @main
 struct AppKiteApp: App {
+    @State private var clipboardHistory = ClipboardHistoryState()
+
     var body: some Scene {
+        let clipboardHistory = clipboardHistory
         MenuBarExtra("AppKite", systemImage: "paperplane") {
-            MenuBarView {
-                NSApplication.shared.terminate(nil)
-            }
+            MenuBarView(
+                onOpenHistory: clipboardHistory.showHistory,
+                collectionPause: clipboardHistory.collectionPause,
+                onPause: clipboardHistory.pauseCollection,
+                onResume: clipboardHistory.resumeCollection,
+                onQuit: { NSApplication.shared.terminate(nil) }
+            )
         }
         .menuBarExtraStyle(.menu)
+
+        Settings {
+            ClipboardSettingsView(history: clipboardHistory)
+        }
     }
 }

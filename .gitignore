@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+xcuserdata/
+
+# Xcode build and test output
+/DerivedData/
+/build/
+*.xcarchive/
+*.xcresult/
+*.dSYM/
+
+# Code coverage output
+*.profraw
+*.profdata
