@@ -52,6 +52,9 @@ Au début d’une session AppKite, lire les fiches racine du bloc ci-dessous lor
 [aidd_docs/memory/testing.md](aidd_docs/memory/testing.md)
 [aidd_docs/memory/vcs.md](aidd_docs/memory/vcs.md)
 
+<!-- folders other plugins own, read on demand -->
+- aidd_docs/tasks/
+
 <!-- aidd_project_memory:end -->
 
 - Load `aidd_docs/memory/external/*` only when asked.
