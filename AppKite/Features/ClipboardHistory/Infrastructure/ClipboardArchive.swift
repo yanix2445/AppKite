@@ -72,6 +72,10 @@ nonisolated struct ClipboardArchive: Sendable {
     private struct Fingerprint {
         private var hash = SHA256()
 
+        init(itemCount: Int) {
+            append(UInt64(itemCount))
+        }
+
         mutating func append(_ value: UInt64) {
             var value = value.bigEndian
             withUnsafeBytes(of: &value) { hash.update(bufferPointer: $0) }
@@ -197,22 +201,27 @@ nonisolated struct ClipboardArchive: Sendable {
 
     func fingerprint(for payload: ClipboardPayload) throws -> String {
         let sources = try payload.items.map { try $0.fileURL.map(sourceFile) }
-        var hash = Fingerprint()
-        hash.append(UInt64(payload.items.count))
+        var hash = Fingerprint(itemCount: payload.items.count)
         for (item, source) in zip(payload.items, sources) {
-            hash.append(UInt64(item.representations.count))
-            for representation in item.representations {
-                hash.appendRepresentation(representation)
-            }
-            if let source {
-                hash.append(UInt64(1))
-                try hashFile(at: source.url, named: source.name, into: &hash)
-            } else {
-                hash.append(UInt64(0))
-            }
+            try appendFingerprint(
+                of: item, file: source.map { ($0.url, $0.name) }, into: &hash)
         }
         try verifyUnchanged(sources)
         return hash.value
+    }
+
+    private func appendFingerprint(
+        of item: ClipboardPayload.Item, file: (url: URL, name: String)?,
+        into hash: inout Fingerprint
+    ) throws {
+        hash.append(UInt64(item.representations.count))
+        for representation in item.representations {
+            hash.appendRepresentation(representation)
+        }
+        hash.append(UInt64(file == nil ? 0 : 1))
+        if let file {
+            try hashFile(at: file.url, named: file.name, into: &hash)
+        }
     }
 
     func stage(_ payload: ClipboardPayload, id: UUID) throws -> StagedArchive {
@@ -222,8 +231,7 @@ nonisolated struct ClipboardArchive: Sendable {
         try createDirectory(directory)
 
         do {
-            var hash = Fingerprint()
-            hash.append(UInt64(payload.items.count))
+            var hash = Fingerprint(itemCount: payload.items.count)
             var items: [Manifest.Item] = []
 
             for (index, item) in payload.items.enumerated() {
@@ -233,25 +241,23 @@ nonisolated struct ClipboardArchive: Sendable {
                 let container = itemContainer(in: directory, index: index)
                 try createDirectory(container)
 
-                hash.append(UInt64(item.representations.count))
                 for (index, representation) in item.representations.enumerated() {
-                    hash.appendRepresentation(representation)
                     try representation.data.write(
                         to: representationURL(in: container, index: index))
                 }
 
-                var fileName: String?
+                let archivedFile: (url: URL, name: String)?
                 if let source = sources[index] {
                     let destination = fileURL(in: container, named: source.name)
                     try createDirectory(destination.deletingLastPathComponent())
                     try FileManager.default.copyItem(at: source.url, to: destination)
-                    hash.append(UInt64(1))
-                    try hashFile(at: destination, named: source.name, into: &hash)
-                    fileName = source.name
+                    archivedFile = (destination, source.name)
                 } else {
-                    hash.append(UInt64(0))
+                    archivedFile = nil
                 }
-                items.append(.init(types: item.representations.map(\.type), fileName: fileName))
+                try appendFingerprint(of: item, file: archivedFile, into: &hash)
+                items.append(
+                    .init(types: item.representations.map(\.type), fileName: archivedFile?.name))
             }
 
             try verifyUnchanged(sources)

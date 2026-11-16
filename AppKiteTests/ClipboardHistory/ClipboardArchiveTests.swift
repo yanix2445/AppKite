@@ -24,6 +24,7 @@ struct ClipboardArchiveTests {
 
         let id = UUID()
         let staged = try fixture.archive.stage(selection, id: id)
+        #expect(staged.fingerprint == (try fixture.archive.fingerprint(for: selection)))
         #expect(throws: (any Error).self) { try fixture.archive.load(id: id) }
         try fixture.archive.publish(staged)
         for original in [first, second, folder] {
@@ -152,6 +153,23 @@ struct ClipboardArchiveTests {
         #expect(try fingerprint([first]) != fingerprint([second]))
         try fixture.attribute(XATTR_RESOURCEFORK_NAME, value: "Une!", at: second)
         #expect(try fingerprint([first]) == fingerprint([second]))
+    }
+
+    @Test func `Clipboard representations keep their persisted fingerprint format`() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let payload = ClipboardPayload(items: [
+            .init(representations: [
+                .init(type: "public.utf8-plain-text", data: Data("Résumé".utf8)),
+                .init(type: "public.html", data: Data("<b>x</b>".utf8)),
+            ]),
+            .init(representations: [.init(type: "public.png", data: Data([0, 0x80, 0xff]))]),
+        ])
+        let persistedFingerprint = "nOVyfkjclukL3zLVg8PD8Gf3Gq81aH3V2p/TlcZVTYQ="
+
+        #expect(try fixture.archive.fingerprint(for: payload) == persistedFingerprint)
+        let staged = try fixture.archive.stage(payload, id: UUID())
+        #expect(staged.fingerprint == persistedFingerprint)
     }
 
     private struct Fixture {

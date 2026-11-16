@@ -21,6 +21,8 @@ nonisolated final class StoredClipboardEntry {
     var indexedText: String?
     var recognizedText: String?
     var needsRecognition: Bool = false
+    // Nil identifies older entries. Empty data marks a prepared preview without table rows.
+    var previewRowsData: Data?
 
     init(text: String, fingerprint: String, sourceBundleIdentifier: String?, copiedAt: Date) {
         self.id = UUID()
@@ -33,6 +35,10 @@ nonisolated final class StoredClipboardEntry {
 
     var entry: ClipboardEntry { card(includingThumbnail: true) }
 
+    func setPreviewRows(_ rows: [[String]]) throws {
+        previewRowsData = rows.isEmpty ? Data() : try JSONEncoder().encode(rows)
+    }
+
     func card(includingThumbnail: Bool) -> ClipboardEntry {
         ClipboardEntry(
             id: id,
@@ -44,11 +50,17 @@ nonisolated final class StoredClipboardEntry {
             kind: kindIdentifier.flatMap(ClipboardPayload.Kind.init(rawValue:)) ?? .text,
             thumbnail: includingThumbnail ? thumbnail : nil,
             probableSourceBundleIdentifier: probableSourceBundleIdentifier,
-            isRemote: isRemote == true
+            isRemote: isRemote == true,
+            tablePreviewRows: tablePreviewRows
         )
     }
 
     var isProtected: Bool { isPinned || collections?.isEmpty == false }
+
+    private var tablePreviewRows: [[String]] {
+        guard let previewRowsData, !previewRowsData.isEmpty else { return [] }
+        return (try? JSONDecoder().decode([[String]].self, from: previewRowsData)) ?? []
+    }
 }
 
 @Model

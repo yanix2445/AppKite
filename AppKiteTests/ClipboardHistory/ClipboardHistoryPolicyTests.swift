@@ -17,7 +17,7 @@ struct ClipboardHistoryPolicyTests {
         try fixture.copy("Pendant la pause après relance")
         #expect(relaunched.pollForCopy() == nil)
         relaunched.resumeCollection()
-        #expect(fixture.preferences.pause == nil)
+        #expect(try fixture.preferences.pause == nil)
         #expect(relaunched.pollForCopy() == nil)
 
         try fixture.copy("Après la reprise")
@@ -37,11 +37,11 @@ struct ClipboardHistoryPolicyTests {
 
         #expect(relaunched.pollForCopy(at: deadline) == nil)
         #expect(!relaunched.isCollectionPaused)
-        #expect(fixture.preferences.pause == nil)
+        #expect(try fixture.preferences.pause == nil)
         try fixture.copy("Après l’échéance")
         #expect(relaunched.pollForCopy(at: deadline)?.payload.plainText == "Après l’échéance")
 
-        fixture.preferences.pause = .until(Date.now.addingTimeInterval(-1))
+        fixture.preferences.setPause(.until(Date.now.addingTimeInterval(-1)))
         try fixture.copy("Présent au lancement")
         let startedAfterDeadline = fixture.relaunch()
         #expect(!startedAfterDeadline.isCollectionPaused)
@@ -49,6 +49,88 @@ struct ClipboardHistoryPolicyTests {
         try fixture.copy("Première copie après relance")
         #expect(
             startedAfterDeadline.pollForCopy()?.payload.plainText == "Première copie après relance")
+    }
+
+    @Test func `Unreadable collection settings suspend collection until explicitly repaired`()
+        throws
+    {
+        let fixture = try Fixture()
+        let pauseKey = "clipboardHistory.pause"
+        let exclusionsKey = "clipboardHistory.excludedApplications"
+        let invalidExclusions = Data("{".utf8)
+        fixture.defaults.set("not a data value", forKey: pauseKey)
+        fixture.defaults.set(invalidExclusions, forKey: exclusionsKey)
+
+        let history = fixture.relaunch()
+        #expect(history.isCollectionPaused)
+        #expect(history.invalidCollectionSettings == [.pause, .exclusions])
+        try fixture.copy("À ignorer")
+        history.resumeCollection()
+        #expect(history.pollForCopy() == nil)
+        #expect(fixture.defaults.string(forKey: pauseKey) == "not a data value")
+
+        history.resetCollectionSetting(.pause)
+        #expect(try fixture.preferences.pause == .manual)
+        #expect(fixture.defaults.data(forKey: exclusionsKey) == invalidExclusions)
+        #expect(fixture.relaunch().invalidCollectionSettings == [.exclusions])
+        history.resumeCollection()
+        #expect(history.pollForCopy() == nil)
+
+        history.resetCollectionSetting(.exclusions)
+        let relaunched = fixture.relaunch()
+        #expect(relaunched.invalidCollectionSettings.isEmpty)
+        #expect(relaunched.collectionPause == .manual)
+        #expect(try fixture.preferences.excludedApplications.isEmpty)
+        relaunched.resumeCollection()
+        #expect(relaunched.pollForCopy() == nil)
+        try fixture.copy("Nouvelle copie")
+        #expect(relaunched.pollForCopy()?.payload.plainText == "Nouvelle copie")
+    }
+
+    @Test func `Failed thumbnails keep search results and clear their warning on retry`()
+        async throws
+    {
+        let fixture = try Fixture()
+        let history = fixture.relaunch()
+        let image = ClipboardEntry(
+            id: UUID(), text: "Image", sourceBundleIdentifier: nil, lastUsedAt: .now, kind: .image)
+        let thumbnail = Data([0x01])
+        let store = ArchiveFixture(
+            cards: [image], sampleThumbnails: [image.id: thumbnail], rejectFirstThumbnailBatch: true
+        )
+        try await history.loadHistory(from: store)
+        try #require(try await waitUntil { history.historyMessage != nil })
+        #expect(history.historyMessage?.key == "Impossible de charger certaines vignettes.")
+        #expect(history.visibleEntries == [image])
+        #expect(!history.isSearching)
+
+        history.showMoreEntries()
+        try #require(try await waitUntil { history.thumbnails[image.id] == thumbnail })
+        #expect(history.historyMessage == nil)
+    }
+
+    @Test func `A saved copy preserves the warning for deferred archive cleanup`() async throws {
+        let fixture = try Fixture()
+        let history = fixture.relaunch()
+        let existing = ClipboardEntry(
+            id: UUID(), text: "À supprimer", sourceBundleIdentifier: nil, lastUsedAt: .now)
+        let store = ArchiveFixture(cards: [existing], deferArchiveCleanup: true)
+        history.startCollection(opening: { store })
+        try #require(try await waitUntil { history.visibleEntries == [existing] })
+
+        history.clearUnprotectedEntries()
+        try #require(
+            try await waitUntil { history.historyMessage != nil && history.visibleEntries.isEmpty })
+        let warning = try #require(history.historyMessage)
+        #expect(
+            warning.key
+                == "Suppression enregistrée. Le nettoyage des fichiers sera retenté au prochain lancement."
+        )
+
+        try fixture.copy("Copie enregistrée")
+        try #require(
+            try await waitUntil { history.visibleEntries.first?.text == "Copie enregistrée" })
+        #expect(history.historyMessage == warning)
     }
 
     @Test func `New copies are captured in order during a suspended archive write`() async throws {
@@ -313,7 +395,7 @@ struct ClipboardHistoryPolicyTests {
         let preferences: ClipboardPreferences
 
         private let suiteName: String
-        private let defaults: UserDefaults
+        let defaults: UserDefaults
 
         init() throws {
             let id = UUID().uuidString
@@ -389,19 +471,24 @@ struct ClipboardHistoryPolicyTests {
         private let rejectFirstWrite: Bool
         private var cards: [ClipboardEntry]
         private let sampleThumbnails: [UUID: Data]
+        private let rejectFirstThumbnailBatch: Bool
+        private let deferArchiveCleanup: Bool
         private(set) var startedCount = 0
         private(set) var thumbnailBatches: [[UUID]] = []
 
         init(
             writes: AsyncStream<ArchiveWrite>.Continuation? = nil, gate: AsyncStream<Void>? = nil,
             rejectFirstWrite: Bool = false, cards: [ClipboardEntry] = [],
-            sampleThumbnails: [UUID: Data] = [:]
+            sampleThumbnails: [UUID: Data] = [:], rejectFirstThumbnailBatch: Bool = false,
+            deferArchiveCleanup: Bool = false
         ) {
             self.writes = writes
             self.gate = gate
             self.rejectFirstWrite = rejectFirstWrite
             self.cards = cards
             self.sampleThumbnails = sampleThumbnails
+            self.rejectFirstThumbnailBatch = rejectFirstThumbnailBatch
+            self.deferArchiveCleanup = deferArchiveCleanup
         }
 
         func record(_ copy: ClipboardCopy, at date: Date) async throws {
@@ -422,20 +509,20 @@ struct ClipboardHistoryPolicyTests {
                     lastUsedAt: date), at: 0)
         }
 
-        func entries() -> [ClipboardEntry] { cards }
         func search(_ query: ClipboardHistoryQuery) -> ClipboardHistoryResults {
             ClipboardHistoryResults(
                 entries: Array(cards.prefix(query.limit)), sourceIdentifiers: [],
                 mostRecentID: cards.first?.id, hasMoreEntries: cards.count > query.limit,
                 canClearHistory: !cards.isEmpty)
         }
-        func thumbnails(for ids: [UUID]) -> [UUID: Data] {
+        func thumbnails(for ids: [UUID]) throws -> [UUID: Data] {
             thumbnailBatches.append(ids)
+            if rejectFirstThumbnailBatch && thumbnailBatches.count == 1 {
+                throw CocoaError(.fileReadUnknown)
+            }
             return sampleThumbnails.filter { ids.contains($0.key) }
         }
         func indexNextPendingEntry() -> Bool { false }
-        func record(text: String, sourceBundleIdentifier: String?, at date: Date) {}
-        func record(payload: ClipboardPayload, sourceBundleIdentifier: String?, at date: Date) {}
         func payload(for id: UUID) throws -> ClipboardPayload {
             throw ClipboardHistoryStoreError.missingEntry
         }
@@ -450,6 +537,11 @@ struct ClipboardHistoryPolicyTests {
         func setMembership(_ isMember: Bool, for entryID: UUID, in collectionID: UUID) {}
         func deleteCollection(id: UUID) {}
         func deleteEntry(id: UUID, confirmingProtection: Bool) {}
-        func clearUnprotectedEntries() {}
+        func clearUnprotectedEntries() throws {
+            cards.removeAll { !$0.isProtected }
+            if deferArchiveCleanup {
+                throw ClipboardHistoryStoreError.archiveCleanupDeferred
+            }
+        }
     }
 }

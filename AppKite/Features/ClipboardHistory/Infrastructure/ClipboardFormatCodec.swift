@@ -85,7 +85,9 @@ nonisolated enum ClipboardFormatCodec {
         {
             return addingTabularFallback(to: representations, data: genericTSV.data)
         }
-        guard let tabular = tabSeparatedCSV(csv.data) else { return representations }
+        guard let tabular = ClipboardDelimitedText.tabSeparatedCSV(csv.data) else {
+            return representations
+        }
         return addingTabularFallback(to: representations, data: tabular)
     }
 
@@ -102,87 +104,15 @@ nonisolated enum ClipboardFormatCodec {
         return result
     }
 
-    private static func tabSeparatedCSV(_ data: Data) -> Data? {
-        let hasUTF16BOM = data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF])
-        guard var csv = String(data: data, encoding: hasUTF16BOM ? .utf16 : .utf8)
-        else { return nil }
-
-        // Scan UTF-8 bytes so delimiters are independent of Unicode grapheme boundaries.
-        return csv.withUTF8 { bytes in
-            let tab: UInt8 = 0x09
-            let lineFeed: UInt8 = 0x0A
-            let carriageReturn: UInt8 = 0x0D
-            let quote: UInt8 = 0x22
-            let comma: UInt8 = 0x2C
-            var index = bytes.starts(with: [0xEF, 0xBB, 0xBF]) ? 3 : 0
-            guard index < bytes.count else { return nil }
-            var output = Data()
-            output.reserveCapacity(bytes.count)
-            while index < bytes.count {
-                let start = index
-                var needsQuotes = false
-                if bytes[index] == quote {
-                    index += 1
-                    while true {
-                        guard index < bytes.count else { return nil }
-                        let byte = bytes[index]
-                        index += 1
-                        if byte == quote {
-                            if index == bytes.count || bytes[index] != quote { break }
-                            index += 1
-                            needsQuotes = true
-                        } else if byte == tab || byte == lineFeed || byte == carriageReturn {
-                            needsQuotes = true
-                        }
-                    }
-                    // Keep quotes around cells that contain a quote, tab, or line break.
-                    let field = needsQuotes ? start..<index : (start + 1)..<(index - 1)
-                    output.append(contentsOf: bytes[field])
-                } else {
-                    while index < bytes.count {
-                        let byte = bytes[index]
-                        if byte == comma || byte == lineFeed || byte == carriageReturn { break }
-                        guard byte != quote else { return nil }
-                        needsQuotes = needsQuotes || byte == tab
-                        index += 1
-                    }
-                    if needsQuotes { output.append(quote) }
-                    output.append(contentsOf: bytes[start..<index])
-                    if needsQuotes { output.append(quote) }
-                }
-                guard index < bytes.count else { break }
-
-                let delimiter = bytes[index]
-                index += 1
-                switch delimiter {
-                case comma:
-                    output.append(tab)
-                case lineFeed, carriageReturn:
-                    if delimiter == carriageReturn, index < bytes.count, bytes[index] == lineFeed {
-                        index += 1
-                    }
-                    if index < bytes.count { output.append(lineFeed) }
-                default:
-                    return nil
-                }
-            }
-            // Encode a final empty cell explicitly so it is not read as a record terminator.
-            if output.isEmpty || output.last == lineFeed {
-                output.append(quote)
-                output.append(quote)
-            }
-            return output
-        }
-    }
-
     static func presentation(for payload: ClipboardPayload)
-        -> (kind: ClipboardPayload.Kind, summary: String, thumbnail: Data?)
+        -> (
+            kind: ClipboardPayload.Kind, summary: String, thumbnail: Data?,
+            tablePreviewRows: [[String]]
+        )
     {
         let kinds = Set(payload.items.map(kind(for:)))
         let kind = kinds.count == 1 ? kinds.first ?? .text : .mixed
-        let summary = payload.items.lazy.compactMap { item in
-            item.fileURL?.lastPathComponent ?? summary(for: item)
-        }.prefix(4).joined(separator: "\n")
+        let preview = textPreview(for: payload, kind: kind)
 
         let thumbnail = payload.items.lazy.flatMap(\.representations).compactMap {
             let kind = Self.kind(for: $0.type)
@@ -190,7 +120,19 @@ nonisolated enum ClipboardFormatCodec {
             return Self.thumbnail(from: $0.data)
         }.first
 
-        return (kind, summary.isEmpty ? defaultSummary(for: kind) : summary, thumbnail)
+        return (kind, preview.summary, thumbnail, preview.tablePreviewRows)
+    }
+
+    static func textPreview(for payload: ClipboardPayload, kind: ClipboardPayload.Kind)
+        -> (summary: String, tablePreviewRows: [[String]])
+    {
+        let summary = payload.items.lazy.compactMap { item in
+            item.fileURL?.lastPathComponent ?? summary(for: item)
+        }.prefix(4).joined(separator: "\n")
+        let rows =
+            kind == .spreadsheet
+            ? Array(payload.items.lazy.flatMap { tablePreviewRows(for: $0) }.prefix(4)) : []
+        return (summary.isEmpty ? defaultSummary(for: kind) : summary, rows)
     }
 
     private static func kind(for item: ClipboardPayload.Item) -> ClipboardPayload.Kind {
@@ -253,18 +195,39 @@ nonisolated enum ClipboardFormatCodec {
         let candidates = [
             PasteboardType.URL.rawValue, PasteboardType.tabularText.rawValue,
             PasteboardType.string.rawValue, UTType.tabSeparatedText.identifier,
-            UTType.commaSeparatedText.identifier,
+            UTType.commaSeparatedText.identifier, UTType.utf16PlainText.identifier,
+            UTType.utf16ExternalPlainText.identifier, UTType.plainText.identifier,
         ]
         for type in candidates {
-            guard let representation = item.representations.first(where: { $0.type == type }) else {
-                continue
-            }
-            // Avoid decoding an entire large text representation for a card's short preview.
-            let prefix = representation.data.prefix(2_400)
-            let text = String(decoding: prefix, as: UTF8.self)
-            if !text.isEmpty { return String(text.prefix(600)) }
+            guard let representation = item.representations.first(where: { $0.type == type }),
+                let text = ClipboardTextDecoding.text(from: representation, byteLimit: 2_400),
+                !text.isEmpty
+            else { continue }
+            return String(text.prefix(600))
         }
         return nil
+    }
+
+    private static func tablePreviewRows(for item: ClipboardPayload.Item) -> [[String]] {
+        let byteLimit = 8_192
+        var candidates: [(type: String, format: ClipboardDelimitedText.Format)] = [
+            (PasteboardType.tabularText.rawValue, .tsv),
+            (UTType.tabSeparatedText.identifier, .tsv),
+            (UTType.commaSeparatedText.identifier, .csv),
+        ]
+        if hasSpreadsheetRepresentation(item.representations) {
+            candidates.append((PasteboardType.string.rawValue, .tsv))
+        }
+        for (type, format) in candidates {
+            guard let representation = item.representations.first(where: { $0.type == type }),
+                let text = ClipboardTextDecoding.text(from: representation, byteLimit: byteLimit),
+                let rows = ClipboardDelimitedText.previewRows(
+                    in: text, format: format, isClipped: representation.data.count > byteLimit),
+                !rows.isEmpty
+            else { continue }
+            return rows
+        }
+        return []
     }
 
     private static func colorHex(from data: Data) -> String? {

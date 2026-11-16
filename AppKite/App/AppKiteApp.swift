@@ -18,6 +18,7 @@ struct AppKiteApp: App {
             MenuBarView(
                 onOpenHistory: clipboardHistory.showHistory,
                 collectionPause: clipboardHistory.collectionPause,
+                requiresCollectionSettingsRepair: clipboardHistory.requiresCollectionSettingsRepair,
                 onPause: clipboardHistory.pauseCollection,
                 onResume: clipboardHistory.resumeCollection,
                 onQuit: { NSApplication.shared.terminate(nil) }

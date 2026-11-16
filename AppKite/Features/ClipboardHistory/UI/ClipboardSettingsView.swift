@@ -69,6 +69,10 @@ private struct ClipboardCollectionSettings: View {
     @State private var importerFailed = false
 
     var body: some View {
+        if history.requiresCollectionSettingsRepair {
+            ClipboardCollectionRepairView(history: history)
+        }
+
         Section("Confidentialité") {
             Toggle(
                 "Ignorer les copies signalées comme confidentielles",
@@ -99,6 +103,7 @@ private struct ClipboardCollectionSettings: View {
                 importerFailed = false
                 isChoosingApplication = true
             }
+            .disabled(history.invalidCollectionSettings.contains(.exclusions))
             if importerFailed {
                 Text("Impossible d’ouvrir l’application sélectionnée.")
                     .foregroundStyle(.secondary)
@@ -118,6 +123,28 @@ private struct ClipboardCollectionSettings: View {
                 history.addExcludedApplication(at: url)
             case .failure:
                 importerFailed = true
+            }
+        }
+    }
+}
+
+private struct ClipboardCollectionRepairView: View {
+    let history: ClipboardHistoryState
+
+    var body: some View {
+        Section("Collecte suspendue") {
+            Text(
+                "La collecte reste en pause après réparation. Reprends-la depuis le menu AppKite quand tes réglages sont prêts."
+            )
+            if history.invalidCollectionSettings.contains(.pause) {
+                Button("Remplacer la pause illisible par une pause manuelle") {
+                    history.resetCollectionSetting(.pause)
+                }
+            }
+            if history.invalidCollectionSettings.contains(.exclusions) {
+                Button("Réinitialiser les exclusions illisibles", role: .destructive) {
+                    history.resetCollectionSetting(.exclusions)
+                }
             }
         }
     }

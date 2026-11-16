@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import os
 
 @testable import AppKite
 
@@ -108,6 +109,49 @@ struct ClipboardStorageRecoveryTests {
         for orphan in orphans {
             #expect(!files.fileExists(atPath: orphan.path))
         }
+    }
+
+    @Test func `Clearing cards still removes other archives after one removal fails`() async throws
+    {
+        let files = FileManager.default
+        let root = try makeDirectory()
+        defer { try? files.removeItem(at: root) }
+        let url = root.appending(path: "history.store")
+        let archives = root.appending(path: "archives")
+        let blockedArchive = OSAllocatedUnfairLock(initialState: Optional<UUID>.none)
+        let orphan: URL
+
+        do {
+            let store = try await SwiftDataClipboardHistoryStore.open(at: url) { archive, id in
+                let isFirst = blockedArchive.withLock { first in
+                    guard first == nil else { return false }
+                    first = id
+                    return true
+                }
+                if isFirst { throw CocoaError(.fileWriteNoPermission) }
+                try archive.remove(id: id)
+            }
+            try await store.record(text: "Première carte", sourceBundleIdentifier: nil, at: .now)
+            try await store.record(text: "Deuxième carte", sourceBundleIdentifier: nil, at: .now)
+            let ids = try await store.entries().map(\.id)
+            try #require(ids.count == 2)
+
+            await #expect(throws: ClipboardHistoryStoreError.archiveCleanupDeferred) {
+                try await store.clearUnprotectedEntries()
+            }
+            let blockedID = try #require(blockedArchive.withLock { $0 })
+            orphan = archives.appending(path: blockedID.uuidString)
+            #expect(try await store.entries().isEmpty)
+            #expect(try await store.search(ClipboardHistoryQuery()).entries.isEmpty)
+            #expect(files.fileExists(atPath: orphan.path))
+            for id in ids where id != blockedID {
+                #expect(!files.fileExists(atPath: archives.appending(path: id.uuidString).path))
+            }
+        }
+
+        let reopened = try await SwiftDataClipboardHistoryStore.open(at: url)
+        #expect(try await reopened.entries().isEmpty)
+        #expect(!files.fileExists(atPath: orphan.path))
     }
 
     private func makeDirectory() throws -> URL {

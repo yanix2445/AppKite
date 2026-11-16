@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import SwiftData
 import Testing
 import UniformTypeIdentifiers
 
@@ -15,6 +16,29 @@ struct ClipboardFormatTests {
         let payload = try roundTrip([.init(representations: [representation(.string, text)])])
         #expect(payload.plainText?.utf8.elementsEqual(text.utf8) == true)
         #expect(ClipboardFormatCodec.presentation(for: payload).kind == .text)
+    }
+
+    @Test func `A UTF-16 only copy shares decoding between preview and search`() throws {
+        let value = "Résumé 🙌"
+        let encoded = try #require(value.data(using: .utf16))
+        let payload = ClipboardPayload(items: [
+            .init(representations: [
+                .init(type: UTType.utf16PlainText.identifier, data: encoded)
+            ])
+        ])
+
+        #expect(ClipboardFormatCodec.presentation(for: payload).summary == value)
+        #expect(ClipboardTextExtractor.immediateText(in: payload) == value)
+    }
+
+    @Test func `A preview clips on a complete grapheme and the index keeps full text`() {
+        let prefix = String(repeating: "👩‍💻", count: 218)
+        let value = prefix + "e\u{301} et la suite"
+        let payload = ClipboardPayload.plainText(value)
+        let preview = ClipboardFormatCodec.presentation(for: payload).summary
+
+        #expect(preview == prefix)
+        #expect(ClipboardTextExtractor.immediateText(in: payload) == value)
     }
 
     @Test func `Rich text preserves attributes alongside the plain version`() throws {
@@ -128,6 +152,91 @@ struct ClipboardFormatTests {
                 .init(representations: input.representations + [representation(.string, values)])
             ])
         #expect(ClipboardFormatCodec.presentation(for: payload).summary == values)
+    }
+
+    @Test func `CSV and TSV previews read quoted cells and bound the grid`() {
+        let csv = representation(
+            .init(UTType.commaSeparatedText.identifier),
+            "\"Été, pommes\",,\"a\"\"b\",masqué\r\n\"ligne 1\r\nligne 2\",prix\r\n3,4,\r\n5,6\r\nmasqué"
+        )
+        let tsv = representation(.tabularText, "\"A\tB\"\t\"ligne 1\nligne 2\"\t\"a\"\"b\"")
+        let tsvPreview = ClipboardFormatCodec.presentation(
+            for: ClipboardPayload(items: [.init(representations: [tsv])]))
+        let csvPreview = ClipboardFormatCodec.presentation(
+            for: ClipboardPayload(items: [.init(representations: [csv])]))
+
+        #expect(csvPreview.kind == .spreadsheet)
+        #expect(
+            csvPreview.tablePreviewRows == [
+                ["Été, pommes", "", "a\"b"], ["ligne 1\r\nligne 2", "prix"], ["3", "4", ""],
+                ["5", "6"],
+            ])
+        #expect(tsvPreview.tablePreviewRows == [["A\tB", "ligne 1\nligne 2", "a\"b"]])
+    }
+
+    @Test func `A bounded table preview keeps prior rows when the next quoted cell is clipped`() {
+        let csv = representation(
+            .init(UTType.commaSeparatedText.identifier),
+            "A,B\n\"" + String(repeating: "long", count: 3_000) + "\",D"
+        )
+        let payload = ClipboardPayload(items: [.init(representations: [csv])])
+
+        #expect(ClipboardFormatCodec.presentation(for: payload).tablePreviewRows == [["A", "B"]])
+    }
+
+    @Test
+    func `An archived CSV card recovers its grid from the original representation after reopening`()
+        async throws
+    {
+        let directory = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appending(path: "history.store")
+        let id = try writeOldCSVCard(at: storeURL)
+        let rows = [["A", "B"], ["C", "D"]]
+        let query = ClipboardHistoryQuery(kind: .spreadsheet)
+
+        do {
+            let store = try await SwiftDataClipboardHistoryStore.open(at: storeURL)
+            #expect(try await store.search(query).entries.first?.tablePreviewRows == [])
+            #expect(try await store.indexNextPendingEntry())
+            #expect(try await !store.indexNextPendingEntry())
+            let updated = try #require(try await store.search(query).entries.first)
+            #expect(updated.id == id)
+            #expect(updated.tablePreviewRows == rows)
+            #expect(updated.isPinned)
+            #expect(
+                try await store.payload(for: id).items[0].representations == [
+                    representation(.init(UTType.commaSeparatedText.identifier), "A,B\nC,D")
+                ])
+        }
+
+        let reopened = try await SwiftDataClipboardHistoryStore.open(at: storeURL)
+        #expect(try await reopened.search(query).entries.first?.tablePreviewRows == rows)
+        #expect(try await !reopened.indexNextPendingEntry())
+    }
+
+    private func writeOldCSVCard(at storeURL: URL) throws -> UUID {
+        let schema = Schema([StoredClipboardEntry.self, StoredClipboardCollection.self])
+        let configuration = ModelConfiguration(
+            schema: schema, url: storeURL, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: schema, configurations: configuration)
+        let context = ModelContext(container)
+        let archive = try ClipboardArchive(
+            root: storeURL.deletingLastPathComponent().appending(path: "archives"))
+        let csv = representation(.init(UTType.commaSeparatedText.identifier), "A,B\nC,D")
+        let payload = ClipboardPayload(items: [.init(representations: [csv])])
+        let card = StoredClipboardEntry(
+            text: "A,B\nC,D", fingerprint: "", sourceBundleIdentifier: nil, copiedAt: .now)
+        let staged = try archive.stage(payload, id: card.id)
+        try archive.publish(staged)
+        card.fingerprint = staged.fingerprint
+        card.hasArchive = true
+        card.isPinned = true
+        card.kindIdentifier = ClipboardPayload.Kind.spreadsheet.rawValue
+        card.indexedText = "A,B\nC,D"
+        context.insert(card)
+        try context.save()
+        return card.id
     }
 
     @Test func `Replay adds a tabular fallback to archived CSV`() throws {

@@ -22,11 +22,17 @@ final class ClipboardHistoryState {
     private(set) var thumbnails: [UUID: Data] = [:]
     private(set) var shortcut: ClipboardShortcut
     private(set) var collectionPause: ClipboardCollectionPause?
-    private(set) var excludedApplications: [ClipboardExcludedApplication]
+    private(set) var excludedApplications: [ClipboardExcludedApplication] = []
     private(set) var ignoresConfidentialCopies: Bool
     private(set) var settingsMessage: LocalizedStringResource?
     private(set) var readStatus = PasteboardClient.ReadStatus.available
-    private(set) var historyMessage: LocalizedStringResource?
+    private(set) var invalidCollectionSettings: Set<ClipboardPreferences.CollectionSetting> = []
+    private var storageMessage: LocalizedStringResource?
+    private var mutationMessage: LocalizedStringResource?
+    private var cleanupMessage: LocalizedStringResource?
+    private var searchMessage: LocalizedStringResource?
+    private var thumbnailMessage: LocalizedStringResource?
+    private var recognitionMessage: LocalizedStringResource?
     private(set) var archiveFailure: LocalizedStringResource?
     private(set) var shortcutMessage: LocalizedStringResource?
 
@@ -63,9 +69,17 @@ final class ClipboardHistoryState {
         self.preferences = preferences
         lastReplayChangeCount = pasteboard.changeCount
         shortcut = preferences.shortcut
-        collectionPause = preferences.pause
-        excludedApplications = preferences.excludedApplications
         ignoresConfidentialCopies = preferences.ignoresConfidentialCopies
+        do {
+            collectionPause = try preferences.pause
+        } catch {
+            invalidCollectionSettings.insert(.pause)
+        }
+        do {
+            excludedApplications = try preferences.excludedApplications
+        } catch {
+            invalidCollectionSettings.insert(.exclusions)
+        }
         resumeIfPauseExpired(at: .now)
         guard startsAutomatically else { return }
         do {
@@ -127,6 +141,11 @@ final class ClipboardHistoryState {
 
     var visibleEntries: [ClipboardEntry] { entries }
     var isFiltering: Bool { query.isFiltering }
+
+    var historyMessage: LocalizedStringResource? {
+        storageMessage ?? mutationMessage ?? searchMessage ?? thumbnailMessage ?? recognitionMessage
+            ?? cleanupMessage
+    }
 
     func selectCollection(_ id: UUID?) {
         selectedCollectionID = id
@@ -231,18 +250,39 @@ final class ClipboardHistoryState {
         }
     }
 
-    var isCollectionPaused: Bool { collectionPause != nil }
+    var requiresCollectionSettingsRepair: Bool { !invalidCollectionSettings.isEmpty }
+    var isCollectionPaused: Bool { collectionPause != nil || requiresCollectionSettingsRepair }
 
     func pauseCollection(_ pause: ClipboardCollectionPause) {
+        guard !requiresCollectionSettingsRepair else { return }
+        setCollectionPause(pause)
+    }
+
+    private func setCollectionPause(_ pause: ClipboardCollectionPause?) {
         collectionPause = pause
-        preferences.pause = pause
+        preferences.setPause(pause)
     }
 
     func resumeCollection() {
+        guard !requiresCollectionSettingsRepair else { return }
         pasteboard.ignoreCurrentContents()
         readStatus = pasteboard.readStatus
-        collectionPause = nil
-        preferences.pause = nil
+        setCollectionPause(nil)
+    }
+
+    func resetCollectionSetting(_ setting: ClipboardPreferences.CollectionSetting) {
+        guard invalidCollectionSettings.contains(setting) else { return }
+        switch setting {
+        case .pause:
+            setCollectionPause(.manual)
+        case .exclusions:
+            if !invalidCollectionSettings.contains(.pause) {
+                setCollectionPause(.manual)
+            }
+            preferences.setExcludedApplications([])
+            excludedApplications = []
+        }
+        invalidCollectionSettings.remove(setting)
     }
 
     func setIgnoresConfidentialCopies(_ value: Bool) {
@@ -251,6 +291,7 @@ final class ClipboardHistoryState {
     }
 
     func addExcludedApplication(at url: URL) {
+        guard !invalidCollectionSettings.contains(.exclusions) else { return }
         guard let bundle = Bundle(url: url), let identifier = bundle.bundleIdentifier else {
             settingsMessage = "Cette application ne fournit pas d’identifiant."
             return
@@ -264,12 +305,13 @@ final class ClipboardHistoryState {
             ?? url.deletingPathExtension().lastPathComponent
         excludedApplications.append(ClipboardExcludedApplication(id: id, name: name))
         excludedApplications.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        preferences.excludedApplications = excludedApplications
+        preferences.setExcludedApplications(excludedApplications)
     }
 
     func removeExcludedApplication(_ application: ClipboardExcludedApplication) {
+        guard !invalidCollectionSettings.contains(.exclusions) else { return }
         excludedApplications.removeAll { $0.id == application.id }
-        preferences.excludedApplications = excludedApplications
+        preferences.setExcludedApplications(excludedApplications)
         settingsMessage = nil
     }
 
@@ -292,6 +334,7 @@ final class ClipboardHistoryState {
             do {
                 let store = try await openStore()
                 try await self?.loadHistory(from: store)
+                self?.storageMessage = nil
                 self?.startRecognition(using: store)
                 let record = RecordClipboard(store: store)
                 let (work, pending) = AsyncStream<CollectionWork>.makeStream()
@@ -303,7 +346,6 @@ final class ClipboardHistoryState {
                             do {
                                 try await record(copy, at: date)
                                 self?.startRecognition(using: store)
-                                self?.historyMessage = nil
                             } catch ClipboardHistoryStoreError.insufficientArchiveCapacity {
                                 self?.archiveFailure =
                                     "Copie non archivée. L’espace disque disponible est insuffisant."
@@ -328,9 +370,9 @@ final class ClipboardHistoryState {
             } catch is CancellationError {
                 return
             } catch ClipboardHistoryStoreError.storageInUse {
-                self?.historyMessage = "L’historique est utilisé par une autre instance d’AppKite."
+                self?.storageMessage = "L’historique est utilisé par une autre instance d’AppKite."
             } catch {
-                self?.historyMessage = "Impossible d’ouvrir l’historique local."
+                self?.storageMessage = "Impossible d’ouvrir l’historique local."
             }
         }
     }
@@ -403,14 +445,24 @@ final class ClipboardHistoryState {
     private func manage(_ action: ManageClipboardHistory.Action) {
         guard let store else { return }
         Task {
+            defer { refreshSearch() }
             do {
                 try await ManageClipboardHistory(store: store)(action)
-                try await reloadCollections(from: store)
-                refreshSearch()
-                historyMessage = nil
+            } catch ClipboardHistoryStoreError.archiveCleanupDeferred {
+                mutationMessage = nil
+                cleanupMessage =
+                    "Suppression enregistrée. Le nettoyage des fichiers sera retenté au prochain lancement."
+                return
             } catch {
-                refreshSearch()
-                historyMessage = "Impossible de modifier l’historique."
+                mutationMessage = "Impossible de modifier l’historique."
+                return
+            }
+            do {
+                try await reloadCollections(from: store)
+                mutationMessage = nil
+            } catch {
+                mutationMessage =
+                    "Modification enregistrée. Impossible d’actualiser les collections."
             }
         }
     }
@@ -449,11 +501,23 @@ final class ClipboardHistoryState {
         let query = query
         isSearching = true
         searchTask = Task { [weak self] in
+            let result: ClipboardHistoryResults
             do {
-                let result = try await SearchClipboardHistory(store: store)(query)
+                result = try await SearchClipboardHistory(store: store)(query)
                 try Task.checkCancellation()
+            } catch is CancellationError {
+                return
+            } catch {
                 guard self?.searchGeneration == generation else { return }
-                self?.apply(result)
+                self?.isSearching = false
+                self?.searchMessage = "Impossible de rechercher dans l’historique."
+                return
+            }
+            guard self?.searchGeneration == generation else { return }
+            self?.searchMessage = nil
+            self?.apply(result)
+
+            do {
                 let ids = self?.pendingThumbnailIDs(in: result.entries) ?? []
                 let batchSize = ClipboardHistoryQuery.pageSize
                 for offset in stride(from: 0, to: ids.count, by: batchSize) {
@@ -467,12 +531,12 @@ final class ClipboardHistoryState {
                         self.thumbnails.merge(thumbnails, uniquingKeysWith: { _, new in new })
                     }
                 }
+                self?.thumbnailMessage = nil
             } catch is CancellationError {
                 return
             } catch {
                 guard self?.searchGeneration == generation else { return }
-                self?.isSearching = false
-                self?.historyMessage = "Impossible de rechercher dans l’historique."
+                self?.thumbnailMessage = "Impossible de charger certaines vignettes."
             }
         }
     }
@@ -510,9 +574,11 @@ final class ClipboardHistoryState {
         recognitionTask = Task(priority: .utility) { [weak self] in
             defer { self?.recognitionTask = nil }
             do {
+                var changed = false
                 while self?.recognitionRequested == true {
                     self?.recognitionRequested = false
                     while try await store.indexNextPendingEntry() {
+                        changed = true
                         try Task.checkCancellation()
                         if self?.isFiltering == true, self?.isSearching == false {
                             self?.refreshSearch()
@@ -520,11 +586,12 @@ final class ClipboardHistoryState {
                         guard self != nil else { return }
                     }
                 }
-                if self?.isFiltering == true { self?.refreshSearch() }
+                if changed { self?.refreshSearch() }
+                self?.recognitionMessage = nil
             } catch is CancellationError {
                 return
             } catch {
-                self?.historyMessage = "Impossible de terminer l’indexation de l’historique."
+                self?.recognitionMessage = "Impossible de terminer l’indexation de l’historique."
             }
         }
     }
@@ -573,7 +640,10 @@ final class ClipboardHistoryState {
                 id: UUID(), text: "Projet\tBudget\nAppKite\t240 €\nDocumentation\t60 €",
                 sourceBundleIdentifier: "com.apple.Numbers",
                 lastUsedAt: .now.addingTimeInterval(-160),
-                kind: .spreadsheet
+                kind: .spreadsheet,
+                tablePreviewRows: [
+                    ["Projet", "Budget"], ["AppKite", "240 €"], ["Documentation", "60 €"],
+                ]
             )
             let richText = ClipboardEntry(
                 id: UUID(), text: "Compte rendu\nLa nouvelle version est prête pour les essais.",

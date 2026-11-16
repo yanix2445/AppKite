@@ -6,25 +6,40 @@ import SQLite3
 import SwiftData
 
 actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
+    private nonisolated struct PreparedEntry: Sendable {
+        let indexedText: String?
+        let recognizedText: String?
+        let preview: (summary: String, tablePreviewRows: [[String]])?
+    }
+
     nonisolated let modelExecutor: any ModelExecutor
     nonisolated let modelContainer: ModelContainer
     private let archive: ClipboardArchive
     private nonisolated let searchIndex = ClipboardSearchIndex()
-    private var recognition: (id: UUID, task: Task<(String, String), any Error>)?
+    private var recognition: (id: UUID, task: Task<PreparedEntry, any Error>)?
     private var failedRecognition: Set<UUID> = []
     private let storageLock: FileHandle
+    private let removeArchive: @Sendable (ClipboardArchive, UUID) throws -> Void
 
-    private init(modelContainer: ModelContainer, archive: ClipboardArchive, storageLock: FileHandle)
-    {
+    private init(
+        modelContainer: ModelContainer, archive: ClipboardArchive, storageLock: FileHandle,
+        removeArchive: @escaping @Sendable (ClipboardArchive, UUID) throws -> Void
+    ) {
         let context = ModelContext(modelContainer)
         context.autosaveEnabled = false
         modelExecutor = DefaultSerialModelExecutor(modelContext: context)
         self.modelContainer = modelContainer
         self.archive = archive
         self.storageLock = storageLock
+        self.removeArchive = removeArchive
     }
 
-    static func open(at url: URL? = nil) async throws -> SwiftDataClipboardHistoryStore {
+    static func open(
+        at url: URL? = nil,
+        removeArchive: @escaping @Sendable (ClipboardArchive, UUID) throws -> Void = {
+            try $0.remove(id: $1)
+        }
+    ) async throws -> SwiftDataClipboardHistoryStore {
         try await Task.detached {
             let storeURL = try url ?? Self.defaultStoreURL()
             let directory = storeURL.deletingLastPathComponent()
@@ -38,7 +53,10 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
                 schema: schema, url: storeURL, cloudKitDatabase: .none)
             let container = try ModelContainer(for: schema, configurations: configuration)
             let archive = try ClipboardArchive(root: directory.appending(path: "archives"))
-            let store = Self(modelContainer: container, archive: archive, storageLock: storageLock)
+            let store = Self(
+                modelContainer: container, archive: archive, storageLock: storageLock,
+                removeArchive: removeArchive
+            )
             try await store.reconcileArchives()
             try await store.loadSearchIndex()
             return store
@@ -105,29 +123,50 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
             sortBy: [SortDescriptor(\.lastUsedAt, order: .reverse)]
         )
         descriptor.fetchLimit = 1
-        guard let id = try modelContext.fetch(descriptor).first?.id else { return false }
+        guard
+            let entry = try modelContext.fetch(descriptor).first
+                ?? nextLegacyPreview(skipping: failed)
+        else { return false }
+        let id = entry.id
+        let needsIndexing = entry.needsRecognition || entry.indexedText == nil
+        let previewKind: ClipboardPayload.Kind? =
+            entry.previewRowsData == nil
+            ? entry.kindIdentifier.flatMap(ClipboardPayload.Kind.init(rawValue:)) : nil
         let archive = archive
         let task = Task.detached(priority: .utility) {
             try Task.checkCancellation()
             let payload = try archive.load(id: id)
-            return (
-                ClipboardTextExtractor.immediateText(in: payload),
-                try ClipboardTextExtractor.recognizedText(in: payload)
+            return PreparedEntry(
+                indexedText: needsIndexing
+                    ? ClipboardTextExtractor.immediateText(in: payload) : nil,
+                recognizedText: needsIndexing
+                    ? try ClipboardTextExtractor.recognizedText(in: payload) : nil,
+                preview: previewKind.map {
+                    ClipboardFormatCodec.textPreview(for: payload, kind: $0)
+                }
             )
         }
         recognition = (id, task)
         defer { recognition = nil }
         do {
-            let (immediate, recognized) = try await withTaskCancellationHandler {
+            let prepared = try await withTaskCancellationHandler {
                 try await task.value
             } onCancel: {
                 task.cancel()
             }
             try Task.checkCancellation()
-            guard let entry = try entry(id: id) else { return true }
-            entry.indexedText = immediate
-            entry.recognizedText = recognized
-            entry.needsRecognition = false
+            guard let entry = try self.entry(id: id) else { return true }
+            if let indexedText = prepared.indexedText {
+                entry.indexedText = indexedText
+            }
+            if let recognizedText = prepared.recognizedText {
+                entry.recognizedText = recognizedText
+                entry.needsRecognition = false
+            }
+            if let preview = prepared.preview {
+                entry.text = preview.summary
+                try entry.setPreviewRows(preview.tablePreviewRows)
+            }
             try save()
             refreshIndex(for: entry)
         } catch is CancellationError {
@@ -137,6 +176,24 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
             failedRecognition.insert(id)
         }
         return true
+    }
+
+    private func nextLegacyPreview(skipping failed: [UUID]) throws -> StoredClipboardEntry? {
+        let spreadsheet: String? = ClipboardPayload.Kind.spreadsheet.rawValue
+        let text: String? = ClipboardPayload.Kind.text.rawValue
+        let unprepared = #Predicate<StoredClipboardEntry> {
+            $0.hasArchive && $0.previewRowsData == nil && !failed.contains($0.id)
+        }
+        var descriptor = FetchDescriptor<StoredClipboardEntry>(
+            predicate: #Predicate {
+                unprepared.evaluate($0)
+                    && ($0.kindIdentifier == spreadsheet
+                        || ($0.kindIdentifier == text && $0.text == "Texte"))
+            },
+            sortBy: [SortDescriptor(\.lastUsedAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
     }
 
     private func loadSearchIndex() throws {
@@ -225,6 +282,7 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
         entry.text = presentation.summary
         entry.kindIdentifier = presentation.kind.rawValue
         entry.thumbnail = presentation.thumbnail
+        try entry.setPreviewRows(presentation.tablePreviewRows)
         entry.fingerprint = legacyFingerprint ?? staged.fingerprint
         entry.hasArchive = true
         entry.indexedText = ClipboardTextExtractor.immediateText(in: payload)
@@ -373,10 +431,16 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
         try save()
         forgetEntries(ids)
 
-        // A failed cleanup is retried at the next open. The database no longer points at these files.
+        // Reopening retries any failed cleanup. The database no longer points at these files.
+        var deferred = false
         for id in archivedIDs {
-            try archive.remove(id: id)
+            do {
+                try removeArchive(archive, id)
+            } catch {
+                deferred = true
+            }
         }
+        if deferred { throw ClipboardHistoryStoreError.archiveCleanupDeferred }
     }
 
     private func forgetEntries(_ ids: [UUID]) {
