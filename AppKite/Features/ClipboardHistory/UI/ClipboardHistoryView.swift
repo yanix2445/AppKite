@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private enum ClipboardHistoryFocus: Hashable {
+enum ClipboardHistoryFocus: Hashable {
     case cards
     case search
 }
@@ -160,7 +160,7 @@ struct ClipboardHistoryView: View {
             collectionsMenu
             toolbarDivider
 
-            ClipboardSearchControls(history: history, focus: $focus, onSubmit: pasteSelected)
+            ClipboardSearchControlsView(history: history, focus: $focus, onSubmit: pasteSelected)
 
             ViewThatFits(in: .horizontal) {
                 commands(showLabels: true)
@@ -246,7 +246,7 @@ struct ClipboardHistoryView: View {
                 Label("Collections", systemImage: "folder")
             }
         }
-        .clipboardToolbarMenu(isActive: selectedCollection != nil)
+        .modifier(ClipboardToolbarMenuStyle(isActive: selectedCollection != nil))
         .accessibilityLabel("Collections")
         .help(selectedCollection?.name ?? "Collections")
         .accessibilityValue(
@@ -268,7 +268,7 @@ struct ClipboardHistoryView: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .clipboardToolbarControl()
+        .modifier(ClipboardToolbarControlStyle())
         .help("Actions de l’historique")
         .accessibilityIdentifier("clipboard-history-actions-menu")
     }
@@ -294,31 +294,37 @@ struct ClipboardHistoryView: View {
 
     @ViewBuilder
     private var pauseControl: some View {
-        if history.isCollectionPaused {
+        if history.requiresCollectionSettingsRepair {
+            SettingsLink {
+                Label(
+                    "Collecte suspendue. Ouvrir les réglages à réparer.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .labelStyle(.iconOnly)
+                .modifier(ClipboardToolbarControlStyle(isActive: true))
+            }
+            .buttonStyle(.plain)
+            .help("Collecte suspendue. Ouvrir les réglages à réparer.")
+            .accessibilityIdentifier("clipboard-collection-settings-repair")
+        } else if history.isCollectionPaused {
             Button(action: history.resumeCollection) {
                 Label("Reprendre la collecte", systemImage: "play.fill")
                     .labelStyle(.iconOnly)
-                    .clipboardToolbarControl(isActive: true)
+                    .modifier(ClipboardToolbarControlStyle(isActive: true))
             }
             .buttonStyle(.plain)
             .help("Reprendre la collecte")
             .accessibilityIdentifier("clipboard-history-paused")
         } else {
             Menu {
-                Button("Jusqu’à la reprise manuelle") { history.pauseCollection(.manual) }
-                ForEach([5, 15, 60], id: \.self) { minutes in
-                    Button("\(minutes) min") {
-                        history.pauseCollection(
-                            .until(.now.addingTimeInterval(Double(minutes * 60))))
-                    }
-                }
+                ClipboardPauseOptionsView(compactLabels: true, onPause: history.pauseCollection)
             } label: {
                 Label("Mettre la collecte en pause", systemImage: "pause.fill")
                     .labelStyle(.iconOnly)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .clipboardToolbarControl()
+            .modifier(ClipboardToolbarControlStyle())
             .help("Mettre la collecte en pause")
         }
     }
@@ -420,7 +426,7 @@ struct ClipboardHistoryView: View {
             let cardHeight = max(0, geometry.size.height - 10)
             HStack(alignment: .center, spacing: 8) {
                 if !pinned.isEmpty {
-                    let cardStep = ClipboardHistoryCard.width + 8
+                    let cardStep = ClipboardHistoryCardView.width + 8
                     let availableWidth =
                         other.isEmpty ? geometry.size.width : geometry.size.width * 0.4
                     let fittingCards = max(1, Int((availableWidth - 2) / cardStep))
@@ -482,7 +488,7 @@ struct ClipboardHistoryView: View {
         return Button {
             history.paste(entry)
         } label: {
-            ClipboardHistoryCard(
+            ClipboardHistoryCardView(
                 entry: entry, thumbnail: history.thumbnails[entry.id] ?? entry.thumbnail,
                 height: height, isSelected: isSelected
             )
@@ -522,494 +528,3 @@ struct ClipboardHistoryView: View {
         }
     }
 }
-
-private struct ClipboardSearchControls: View {
-    @Bindable var history: ClipboardHistoryState
-    let focus: FocusState<ClipboardHistoryFocus?>.Binding
-    let onSubmit: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            searchField
-                .frame(minWidth: 150, idealWidth: 240, maxWidth: 240)
-
-            ClipboardSourceMenu(history: history)
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) {
-                    filterChip(nil)
-                    ForEach(ClipboardPayload.Kind.allCases, id: \.rawValue) { kind in
-                        filterChip(kind)
-                    }
-                }
-                .fixedSize(horizontal: true, vertical: false)
-
-                Menu {
-                    Picker("Type de copie", selection: $history.selectedKind) {
-                        Text("Tous les types").tag(nil as ClipboardPayload.Kind?)
-                        ForEach(ClipboardPayload.Kind.allCases, id: \.rawValue) { kind in
-                            Text(kind.title).tag(kind as ClipboardPayload.Kind?)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                } label: {
-                    Label(
-                        history.selectedKind?.filterTitle ?? "Type",
-                        systemImage: "line.3.horizontal.decrease")
-                }
-                .clipboardToolbarMenu(isActive: history.selectedKind != nil)
-                .accessibilityLabel("Type de copie")
-                .accessibilityIdentifier("clipboard-kind-filter")
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            TextField("Rechercher", text: $history.searchText)
-                .textFieldStyle(.plain)
-                .accessibilityLabel("Rechercher dans l’historique")
-                .focused(focus, equals: .search)
-                .onSubmit(onSubmit)
-                .onKeyPress(.downArrow) {
-                    focus.wrappedValue = .cards
-                    return .handled
-                }
-                .onKeyPress(.escape) {
-                    focus.wrappedValue = .cards
-                    return .handled
-                }
-                .accessibilityIdentifier("clipboard-history-search")
-
-            if !history.searchText.isEmpty {
-                Button {
-                    history.searchText = ""
-                    focus.wrappedValue = .search
-                } label: {
-                    Label("Effacer la recherche", systemImage: "xmark.circle.fill")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("clipboard-search-clear")
-            }
-        }
-        .font(.caption)
-        .padding(.horizontal, 10)
-        .frame(height: 28)
-        .background(.primary.opacity(0.09), in: .capsule)
-    }
-
-    private func filterChip(_ kind: ClipboardPayload.Kind?) -> some View {
-        let active = history.selectedKind == kind
-        return Button {
-            history.selectedKind = kind
-        } label: {
-            Text(kind?.filterTitle ?? "Tout")
-                .font(.system(.caption).weight(active ? .semibold : .medium))
-                .foregroundStyle(active ? .white : .primary)
-                .padding(.horizontal, 11)
-                .frame(height: 28)
-                .background(
-                    active ? Color(nsColor: .controlAccentColor) : .primary.opacity(0.075),
-                    in: .capsule
-                )
-                .contentShape(.capsule)
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(active ? .isSelected : [])
-        .accessibilityIdentifier("clipboard-kind-\(kind?.rawValue ?? "all")")
-    }
-}
-
-extension View {
-    fileprivate func clipboardToolbarMenu(isActive: Bool) -> some View {
-        self.menuStyle(.borderlessButton)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(isActive ? Color.accentColor : Color.primary)
-            .padding(.horizontal, 8)
-            .frame(height: 28)
-            .background(
-                isActive ? Color.accentColor.opacity(0.14) : .primary.opacity(0.075),
-                in: .capsule
-            )
-            .fixedSize()
-    }
-
-    fileprivate func clipboardToolbarControl(isActive: Bool = false) -> some View {
-        self.font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(isActive ? Color.accentColor : Color.primary)
-            .frame(width: 28, height: 28)
-            .background(
-                isActive ? Color.accentColor.opacity(0.14) : .primary.opacity(0.075),
-                in: .circle
-            )
-    }
-}
-
-private struct ClipboardSourceMenu: View {
-    @Bindable var history: ClipboardHistoryState
-
-    var body: some View {
-        Menu {
-            Picker("Application d’origine", selection: $history.selectedSource) {
-                Text("Toutes les applications").tag(nil as String?)
-                ForEach(history.sourceIdentifiers, id: \.self) { identifier in
-                    Text(verbatim: history.sourceName(identifier)).tag(identifier as String?)
-                }
-            }
-            .pickerStyle(.inline)
-        } label: {
-            if let source = history.selectedSource {
-                Text(verbatim: history.sourceName(source))
-                    .lineLimit(1)
-                    .frame(maxWidth: 120)
-            } else {
-                Text("Application")
-            }
-        }
-        .clipboardToolbarMenu(isActive: history.selectedSource != nil)
-        .help(history.selectedSource.map(history.sourceName) ?? "Application d’origine")
-        .accessibilityLabel("Application d’origine")
-        .accessibilityValue(
-            history.selectedSource.map { Text(verbatim: history.sourceName($0)) }
-                ?? Text("Toutes les applications")
-        )
-        .accessibilityIdentifier("clipboard-source-filter")
-    }
-}
-
-extension ClipboardPayload.Kind {
-    fileprivate var filterTitle: LocalizedStringKey {
-        switch self {
-        case .files: "Fichiers"
-        case .spreadsheet: "Tableur"
-        case .mixed: "Mixte"
-        default: title
-        }
-    }
-
-    fileprivate var title: LocalizedStringKey {
-        switch self {
-        case .text: "Texte"
-        case .richText: "Texte enrichi"
-        case .link: "Lien"
-        case .image: "Image"
-        case .files: "Fichiers et dossiers"
-        case .spreadsheet: "Cellules de tableur"
-        case .pdf: "PDF"
-        case .color: "Couleur"
-        case .mixed: "Contenu mixte"
-        }
-    }
-
-    fileprivate var symbol: String {
-        switch self {
-        case .text: "text.alignleft"
-        case .richText: "textformat"
-        case .link: "link"
-        case .image: "photo"
-        case .files: "folder"
-        case .spreadsheet: "tablecells"
-        case .pdf: "doc.richtext"
-        case .color: "eyedropper"
-        case .mixed: "paperclip"
-        }
-    }
-
-    fileprivate var cardHeaderTitle: LocalizedStringKey {
-        switch self {
-        case .text: "Texte brut"
-        case .image: "Image copiée"
-        case .files: "Fichier"
-        default: filterTitle
-        }
-    }
-
-    fileprivate var cardHeaderColor: Color {
-        switch self {
-        case .text, .richText: Color(red: 0.07, green: 0.40, blue: 0.74)
-        case .link: Color(red: 0.11, green: 0.40, blue: 0.48)
-        case .image: Color(red: 0.23, green: 0.70, blue: 0.85)
-        case .files, .pdf: Color(red: 0.05, green: 0.34, blue: 0.65)
-        case .spreadsheet: Color(red: 0.09, green: 0.42, blue: 0.30)
-        case .color: Color(red: 0.12, green: 0.12, blue: 0.14)
-        case .mixed: Color(red: 0.96, green: 0.73, blue: 0.10)
-        }
-    }
-
-    fileprivate var cardHeaderInk: Color {
-        switch self {
-        case .image, .mixed: .black
-        default: .white
-        }
-    }
-}
-
-private struct ClipboardHistoryCard: View {
-    let entry: ClipboardEntry
-    let thumbnail: Data?
-    let height: CGFloat
-    let isSelected: Bool
-    @Environment(\.colorScheme) private var colorScheme
-
-    static let width: CGFloat = 196
-    private let shape = RoundedRectangle(cornerRadius: 14)
-    private let headerHeight: CGFloat = 40
-
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            preview
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-            footer
-        }
-        .frame(width: Self.width, height: height)
-        .background(
-            colorScheme == .dark ? .white.opacity(0.09) : .white.opacity(0.52),
-            in: shape
-        )
-        .clipShape(shape)
-        .overlay {
-            shape.strokeBorder(
-                isSelected ? Color.accentColor : Color.primary.opacity(0.12),
-                lineWidth: isSelected ? 2.5 : 1
-            )
-            .allowsHitTesting(false)
-        }
-        .contentShape(shape)
-    }
-
-    private var header: some View {
-        let source =
-            entry.isRemote
-            ? nil
-            : ClipboardSourceAppearance.resolve(
-                for: entry.sourceBundleIdentifier ?? entry.probableSourceBundleIdentifier)
-        let isProbable = entry.sourceBundleIdentifier == nil && source != nil
-        let ink = source?.headerInk ?? entry.kind.cardHeaderInk
-        return HStack(spacing: 5) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(entry.kind.cardHeaderTitle)
-                    .font(.system(size: 12, weight: .bold))
-                    .lineLimit(1)
-                HStack(spacing: 3) {
-                    if entry.isRemote {
-                        Text("Presse-papiers universel")
-                        Text("·").accessibilityHidden(true)
-                    } else if let source {
-                        if isProbable {
-                            Text("\(source.name) ?")
-                                .accessibilityLabel("Origine probable : \(source.name)")
-                                .help("Origine probable : \(source.name)")
-                        } else {
-                            Text(verbatim: source.name)
-                        }
-                        Text("·").accessibilityHidden(true)
-                    }
-                    Text(
-                        entry.lastUsedAt,
-                        format: .relative(presentation: .named, unitsStyle: .abbreviated)
-                    )
-                    .layoutPriority(1)
-                }
-                .font(.system(size: 10))
-                .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-            if let source {
-                Image(nsImage: source.icon)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: headerHeight * 0.95, height: headerHeight * 0.95)
-                    .accessibilityHidden(true)
-            } else {
-                Image(systemName: entry.isRemote ? "iphone.and.arrow.forward" : entry.kind.symbol)
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 20, height: 20)
-                    .background(entry.kind.cardHeaderInk.opacity(0.16), in: .rect(cornerRadius: 5))
-                    .accessibilityHidden(true)
-            }
-        }
-        .foregroundStyle(ink)
-        .padding(.leading, 9)
-        .padding(.trailing, 5)
-        .frame(height: headerHeight)
-        .background(source?.headerColor ?? entry.kind.cardHeaderColor, in: .rect)
-    }
-
-    @ViewBuilder
-    private var preview: some View {
-        if entry.kind == .pdf, let thumbnail, let image = NSImage(data: thumbnail) {
-            VStack(spacing: 5) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.primary.opacity(0.06), in: .rect(cornerRadius: 7))
-                    .accessibilityHidden(true)
-                if entry.text != "PDF" {
-                    Text(verbatim: entry.text)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                }
-            }
-            .padding(9)
-        } else if let thumbnail, let image = NSImage(data: thumbnail) {
-            GeometryReader { proxy in
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: entry.kind == .image ? .fill : .fit)
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-            }
-            .padding(entry.kind == .image ? 0 : 9)
-            .accessibilityLabel(Text(verbatim: entry.text))
-        } else if entry.kind == .color, let color = swatch {
-            ZStack {
-                color
-                Text(verbatim: entry.text)
-                    .font(.system(.caption, design: .monospaced).weight(.medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .foregroundStyle(.black)
-                    .background(.white.opacity(0.9), in: .rect(cornerRadius: 7))
-            }
-        } else if entry.kind == .files || entry.kind == .pdf || entry.kind == .image {
-            VStack(spacing: 6) {
-                Image(systemName: entry.kind.symbol)
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                Text(verbatim: String(entry.text.prefix(400)))
-                    .font(.callout.weight(.medium))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(3)
-            }
-            .padding(8)
-        } else if entry.kind == .spreadsheet {
-            tablePreview
-        } else if entry.kind == .link, let url = URL(string: entry.text), let host = url.host {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(verbatim: host).font(.callout.weight(.semibold))
-                Text(verbatim: url.path.isEmpty ? entry.text : url.path)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(10)
-        } else {
-            Text(verbatim: String(entry.text.prefix(600)))
-                .font(.system(size: 13, weight: entry.kind == .richText ? .medium : .regular))
-                .lineSpacing(2)
-                .lineLimit(5)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(10)
-        }
-    }
-
-    private var tablePreview: some View {
-        let rows = entry.text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
-            .prefix(4).map {
-                Array($0.split(separator: "\t", omittingEmptySubsequences: false).prefix(3))
-            }
-        return Grid(alignment: .leading, horizontalSpacing: 9, verticalSpacing: 5) {
-            ForEach(rows.indices, id: \.self) { row in
-                GridRow {
-                    ForEach(rows[row].indices, id: \.self) { column in
-                        Text(verbatim: String(rows[row][column]))
-                            .lineLimit(1)
-                            .fontWeight(row == 0 ? .semibold : .regular)
-                    }
-                }
-            }
-        }
-        .font(.caption.monospacedDigit())
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(10)
-    }
-
-    private var footer: some View {
-        HStack(spacing: 7) {
-            switch entry.kind {
-            case .text, .richText:
-                let lines = entry.text.split(
-                    omittingEmptySubsequences: false, whereSeparator: \.isNewline)
-                Text(lines.count == 1 ? "1 ligne" : "\(lines.count) lignes")
-            case .link:
-                Text(URL(string: entry.text)?.scheme?.uppercased() ?? "Lien")
-            case .color:
-                Text(swatch == nil ? "Couleur" : "sRGB")
-            case .spreadsheet:
-                let count = entry.text.split(whereSeparator: \.isNewline).count
-                Text(count == 1 ? "1 ligne" : "\(count) lignes")
-            case .image, .pdf:
-                Text(verbatim: entry.text)
-            case .files, .mixed:
-                if !entry.collectionIDs.isEmpty {
-                    Text("Dans une collection")
-                }
-            }
-            Spacer(minLength: 0)
-            if !entry.collectionIDs.isEmpty {
-                Image(systemName: "folder").accessibilityLabel("Dans une collection")
-            }
-            if entry.isPinned {
-                Image(systemName: "pin.fill").accessibilityLabel("Épinglée")
-            }
-        }
-        .font(.system(size: 10, weight: .medium))
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-        .padding(.horizontal, 10)
-        .frame(height: 23)
-    }
-
-    private var swatch: Color? {
-        let hex = entry.text.dropFirst()
-        guard entry.text.hasPrefix("#"), hex.count == 6 || hex.count == 8,
-            let value = UInt64(hex, radix: 16)
-        else { return nil }
-        let rgba = hex.count == 6 ? value << 8 | 255 : value
-        return Color(
-            .sRGB, red: Double((rgba >> 24) & 255) / 255,
-            green: Double((rgba >> 16) & 255) / 255, blue: Double((rgba >> 8) & 255) / 255,
-            opacity: Double(rgba & 255) / 255
-        )
-    }
-}
-
-#if DEBUG
-    #Preview("Bandeau Liquid Glass", traits: .fixedLayout(width: 1_680, height: 300)) {
-        ClipboardHistoryView(history: .preview)
-            .environment(\.locale, Locale(identifier: "fr_FR"))
-    }
-
-    #Preview("Bandeau compact", traits: .fixedLayout(width: 780, height: 300)) {
-        ClipboardHistoryView(history: .preview)
-            .environment(\.locale, Locale(identifier: "fr_FR"))
-    }
-
-    #Preview("Bandeau sur le bureau", traits: .fixedLayout(width: 1_680, height: 496)) {
-        ZStack(alignment: .bottom) {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.09, green: 0.11, blue: 0.27),
-                    Color(red: 0.25, green: 0.13, blue: 0.35),
-                    Color(red: 0.42, green: 0.17, blue: 0.21),
-                ],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
-            ClipboardHistoryView(history: .preview)
-                .environment(\.locale, Locale(identifier: "fr_FR"))
-                .frame(height: ClipboardHistoryView.preferredHeight)
-                .padding(.horizontal, 12)
-        }
-        .preferredColorScheme(.dark)
-    }
-#endif

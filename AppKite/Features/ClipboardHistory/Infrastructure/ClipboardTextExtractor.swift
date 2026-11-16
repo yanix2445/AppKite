@@ -15,7 +15,7 @@ nonisolated enum ClipboardTextExtractor {
                 texts.append(file.lastPathComponent)
                 continue
             }
-            let plain = item.representations.compactMap(text(from:))
+            let plain = item.representations.compactMap { ClipboardTextDecoding.text(from: $0) }
             texts.append(contentsOf: plain)
             if !item.representations.contains(where: { ClipboardFormatCodec.isTextType($0.type) }),
                 let richText = item.representations.lazy.compactMap(richText(from:)).first
@@ -52,20 +52,6 @@ nonisolated enum ClipboardTextExtractor {
             }
         }
         return joined(texts)
-    }
-
-    private static func text(from representation: Representation) -> String? {
-        switch representation.type {
-        case UTType.utf16PlainText.identifier, UTType.utf16ExternalPlainText.identifier:
-            String(data: representation.data, encoding: .utf16)
-        case ClipboardPayload.utf8TextType, UTType.plainText.identifier,
-            PasteboardType.URL.rawValue, "public.url-name", PasteboardType.tabularText.rawValue,
-            UTType.tabSeparatedText.identifier, UTType.commaSeparatedText.identifier:
-            String(data: representation.data, encoding: .utf8)
-                ?? String(data: representation.data, encoding: .utf16)
-        default:
-            nil
-        }
     }
 
     private static func richText(from representation: Representation) -> String? {

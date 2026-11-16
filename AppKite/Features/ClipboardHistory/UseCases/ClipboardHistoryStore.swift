@@ -1,13 +1,9 @@
 import Foundation
 
 nonisolated protocol ClipboardHistoryStore: Sendable {
-    func entries() async throws -> [ClipboardEntry]
     func search(_ query: ClipboardHistoryQuery) async throws -> ClipboardHistoryResults
     func thumbnails(for ids: [UUID]) async throws -> [UUID: Data]
     func indexNextPendingEntry() async throws -> Bool
-    func record(text: String, sourceBundleIdentifier: String?, at date: Date) async throws
-    func record(payload: ClipboardPayload, sourceBundleIdentifier: String?, at date: Date)
-        async throws
     func record(_ copy: ClipboardCopy, at date: Date) async throws
     func payload(for id: UUID) async throws -> ClipboardPayload
     func prepareReplay(for id: UUID, replayID: UUID) async throws -> ClipboardPayload
@@ -28,4 +24,5 @@ nonisolated enum ClipboardHistoryStoreError: Error {
     case protectedEntry
     case missingEntry
     case insufficientArchiveCapacity
+    case archiveCleanupDeferred
 }
