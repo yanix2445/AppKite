@@ -209,6 +209,84 @@ struct ClipboardHistoryPolicyTests {
         #expect(history.archiveFailure == nil)
     }
 
+    @Test func selectAllIncludesLaterPagesAndClearsPinnedSelection() async throws {
+        let fixture = try Fixture()
+        let history = fixture.relaunch()
+        let count = ClipboardHistoryQuery.pageSize + 3
+        let cards = (0..<count).map { index in
+            ClipboardEntry(
+                id: UUID(), text: "Carte \(index)", sourceBundleIdentifier: nil, lastUsedAt: .now,
+                isPinned: index == 0 || index == count - 1)
+        }
+        let store = ArchiveFixture(cards: cards)
+        try await history.loadHistory(from: store)
+        try #require(
+            try await waitUntil { history.visibleEntries.count == ClipboardHistoryQuery.pageSize })
+
+        let pinned = try #require(cards.first)
+        #expect(history.selectedIDs == [pinned.id])
+        history.selectAllUnpinned()
+        #expect(history.selectedIDs == Set(cards.filter { !$0.isPinned }.map(\.id)))
+        #expect(history.hasMoreEntries)
+        #expect(history.focusedEntryID != pinned.id)
+
+        history.showMoreEntries()
+        try #require(try await waitUntil { history.visibleEntries.count == count })
+        #expect(history.selectedIDs == Set(cards.filter { !$0.isPinned }.map(\.id)))
+    }
+
+    @Test func selectAllWaitsForTheCurrentFilterAndIsClearedWhenItChanges() async throws {
+        let fixture = try Fixture()
+        let history = fixture.relaunch()
+        let pinned = ClipboardEntry(
+            id: UUID(), text: "Épingle", sourceBundleIdentifier: nil, lastUsedAt: .now,
+            isPinned: true)
+        let unpinned = ClipboardEntry(
+            id: UUID(), text: "Copie", sourceBundleIdentifier: nil, lastUsedAt: .now)
+        try await history.loadHistory(from: ArchiveFixture(cards: [pinned, unpinned]))
+        try #require(try await waitUntil { history.selectedIDs == [pinned.id] })
+
+        history.showMoreEntries()
+        #expect(history.isSearching)
+        history.selectAllUnpinned()
+        #expect(history.selectedIDs == [unpinned.id])
+
+        history.searchText = "Co"
+        #expect(history.isSearching)
+        history.selectAllUnpinned()
+        try #require(try await waitUntil { !history.isSearching })
+        #expect(history.selectedIDs == [unpinned.id])
+
+        history.searchText = "Cop"
+        history.selectAllUnpinned()
+        history.searchText = "Copie"
+        try #require(try await waitUntil { !history.isSearching })
+        #expect(history.selectedIDs == [pinned.id])
+    }
+
+    @Test func selectAllWaitsForTheInitialStore() async throws {
+        let fixture = try Fixture()
+        let history = fixture.relaunch()
+        let pinned = ClipboardEntry(
+            id: UUID(), text: "Épingle", sourceBundleIdentifier: nil, lastUsedAt: .now,
+            isPinned: true)
+        let unpinned = ClipboardEntry(
+            id: UUID(), text: "Copie", sourceBundleIdentifier: nil, lastUsedAt: .now)
+        let store = ArchiveFixture(cards: [pinned, unpinned])
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        history.startCollection(opening: {
+            var step = gate.makeAsyncIterator()
+            _ = await step.next()
+            return store
+        })
+
+        history.selectAllUnpinned()
+        open.yield(())
+        open.finish()
+        try #require(try await waitUntil { history.visibleEntries.count == 2 })
+        #expect(history.selectedIDs == [unpinned.id])
+    }
+
     @Test(arguments: [1, 3])
     func `Later images get thumbnails when earlier pages have none`(emptyPages: Int) async throws {
         let fixture = try Fixture()
@@ -511,7 +589,8 @@ struct ClipboardHistoryPolicyTests {
 
         func search(_ query: ClipboardHistoryQuery) -> ClipboardHistoryResults {
             ClipboardHistoryResults(
-                entries: Array(cards.prefix(query.limit)), sourceIdentifiers: [],
+                entries: Array(cards.prefix(query.limit)),
+                matchingUnpinnedIDs: cards.filter { !$0.isPinned }.map(\.id), sourceIdentifiers: [],
                 mostRecentID: cards.first?.id, hasMoreEntries: cards.count > query.limit,
                 canClearHistory: !cards.isEmpty)
         }
@@ -527,17 +606,17 @@ struct ClipboardHistoryPolicyTests {
             throw ClipboardHistoryStoreError.missingEntry
         }
         func previewSource(for id: UUID) -> ClipboardPreviewSource? { nil }
-        func prepareReplay(for id: UUID, replayID: UUID) throws -> ClipboardPayload {
-            try payload(for: id)
+        func prepareReplay(for ids: [UUID], replayID: UUID) throws -> ClipboardPayload {
+            throw ClipboardHistoryStoreError.missingEntry
         }
         func removeReplays(exceptKeeping replayID: UUID?) {}
-        func markUsed(id: UUID, at date: Date) {}
+        func markUsed(ids: [UUID], at date: Date) {}
         func collections() -> [ClipboardCollection] { [] }
         func setPinned(_ isPinned: Bool, for entryID: UUID) {}
         func createCollection(named name: String) {}
         func setMembership(_ isMember: Bool, for entryID: UUID, in collectionID: UUID) {}
         func deleteCollection(id: UUID) {}
-        func deleteEntry(id: UUID, confirmingProtection: Bool) {}
+        func deleteEntries(ids: Set<UUID>, confirmingProtection: Bool) {}
         func clearUnprotectedEntries() throws {
             cards.removeAll { !$0.isProtected }
             if deferArchiveCleanup {

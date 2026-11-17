@@ -123,6 +123,45 @@ nonisolated enum ClipboardFormatCodec {
         return (kind, preview.summary, thumbnail, preview.tablePreviewRows)
     }
 
+    static func groupedReplay(_ payloads: [ClipboardPayload]) throws -> ClipboardPayload {
+        if let first = payloads.first, payloads.count == 1 { return first }
+
+        let items = payloads.flatMap(\.items)
+        let native = ClipboardPayload(items: items)
+        guard !items.isEmpty,
+            items.allSatisfy({ item in
+                switch kind(for: item) {
+                case .text, .richText, .link: true
+                default: false
+                }
+            })
+        else { return native }
+
+        var remaining = ClipboardArchive.groupedReplayByteLimit - Int64(items.count - 1)
+        var texts: [String] = []
+        for item in items {
+            guard let text = textForGroupedReplay(item.representations) else { return native }
+            let bytes = Int64(text.utf8.count)
+            guard bytes <= remaining else { throw ClipboardHistoryStoreError.groupedReplayTooLarge }
+            remaining -= bytes
+            texts.append(text)
+        }
+        return .plainText(texts.joined(separator: "\n"))
+    }
+
+    private static func textForGroupedReplay(_ representations: [ClipboardPayload.Representation])
+        -> String?
+    {
+        if let url = representations.first(where: { $0.type == PasteboardType.URL.rawValue }),
+            let address = ClipboardTextDecoding.text(from: url)
+        {
+            return address
+        }
+        return representations.lazy.filter { isTextType($0.type) }
+            .compactMap { ClipboardTextDecoding.text(from: $0) }.first
+            ?? representations.lazy.compactMap(ClipboardTextExtractor.richText(from:)).first
+    }
+
     static func textPreview(for payload: ClipboardPayload, kind: ClipboardPayload.Kind)
         -> (summary: String, tablePreviewRows: [[String]])
     {

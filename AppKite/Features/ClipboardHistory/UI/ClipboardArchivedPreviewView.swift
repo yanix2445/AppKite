@@ -169,14 +169,13 @@ struct ClipboardPlaybackButton: View {
     let playback: ClipboardPreviewPlayback
     let media: ClipboardPreview.Media
     let entryID: UUID
+    let action: () -> Void
 
     private var isPlaying: Bool { playback.activeID == entryID && playback.isPlaying }
     private var failed: Bool { playback.failedID == entryID }
 
     var body: some View {
-        Button {
-            playback.toggle(media, for: entryID)
-        } label: {
+        Button(action: action) {
             Label(
                 isPlaying ? "Mettre en pause" : "Lire",
                 systemImage: isPlaying ? "pause.fill" : "play.fill"

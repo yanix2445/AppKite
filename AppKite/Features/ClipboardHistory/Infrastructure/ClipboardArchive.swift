@@ -4,6 +4,9 @@ import Foundation
 import OSLog
 
 nonisolated struct ClipboardArchive: Sendable {
+    static let groupedReplayItemLimit = 4_096
+    static let groupedReplayByteLimit: Int64 = 64 * 1_024 * 1_024
+
     private static let recoveryReserveSize: Int64 = 16 * 1024 * 1024
     private static let logger = Logger(
         subsystem: "com.appkite.AppKite", category: "ClipboardArchive")
@@ -385,11 +388,81 @@ nonisolated struct ClipboardArchive: Sendable {
     }
 
     func makeReplay(from id: UUID, replayID: UUID) throws -> ClipboardPayload {
+        guard let payload = try makeReplays(from: [id], replayID: replayID)[id] else {
+            throw ArchiveError.invalidArchive
+        }
+        return payload
+    }
+
+    func checkGroupedReplay(from ids: [UUID], legacyTexts: [String]) throws {
+        // Direct representations are materialized for the pasteboard. Files use replay URLs.
+        var remainingPayload = Self.groupedReplayByteLimit
+        var remainingItems = Self.groupedReplayItemLimit - legacyTexts.count
+        var remainingDisk = try availableBytes()
+        for text in legacyTexts {
+            try consumeReplayBytes(Int64(text.utf8.count), remaining: &remainingPayload)
+        }
+
+        for id in ids {
+            let directory = itemDirectory(in: root, id: id)
+            let manifest = try readManifest(in: directory)
+            guard manifest.items.count <= remainingItems else {
+                throw ClipboardHistoryStoreError.groupedReplayTooLarge
+            }
+            remainingItems -= manifest.items.count
+            for (index, item) in manifest.items.enumerated() {
+                let container = itemContainer(in: directory, index: index)
+                for representation in item.types.indices {
+                    let url = representationURL(in: container, index: representation)
+                    let bytes = try FileState(url: url).size
+                    try consumeReplayBytes(bytes, remaining: &remainingPayload)
+                }
+                if let name = item.fileName {
+                    try checkReplayFile(
+                        fileURL(in: container, named: name), remaining: &remainingDisk)
+                }
+            }
+        }
+    }
+
+    private func consumeReplayBytes(_ bytes: Int64, remaining: inout Int64) throws {
+        guard bytes >= 0, bytes <= remaining else {
+            throw ClipboardHistoryStoreError.groupedReplayTooLarge
+        }
+        remaining -= bytes
+    }
+
+    private func checkReplayFile(_ url: URL, remaining: inout Int64) throws {
+        let file = try FileState(url: url)
+        try validate(file: file)
+        if file.type == S_IFDIR {
+            for child in try children(of: url) {
+                try checkReplayFile(child, remaining: &remaining)
+            }
+        } else if file.type == S_IFREG {
+            guard file.size <= remaining else {
+                throw ClipboardHistoryStoreError.insufficientReplayCapacity
+            }
+            remaining -= file.size
+        }
+    }
+
+    func makeReplays(from ids: [UUID], replayID: UUID) throws -> [UUID: ClipboardPayload] {
         let directory = itemDirectory(in: replays, id: replayID)
+        var payloads: [UUID: ClipboardPayload] = [:]
         do {
-            return try load(from: itemDirectory(in: root, id: id), copyingFilesTo: directory)
+            for id in ids where payloads[id] == nil {
+                let destination =
+                    ids.count == 1 ? directory : itemDirectory(in: directory, id: id)
+                payloads[id] = try load(
+                    from: itemDirectory(in: root, id: id), copyingFilesTo: destination)
+            }
+            return payloads
         } catch {
             try? removeIfPresent(directory)
+            if (error as? CocoaError)?.code == .fileWriteOutOfSpace {
+                throw ClipboardHistoryStoreError.insufficientReplayCapacity
+            }
             throw error
         }
     }

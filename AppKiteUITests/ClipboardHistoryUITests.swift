@@ -3,6 +3,93 @@ import XCTest
 
 final class ClipboardHistoryUITests: XCTestCase {
     @MainActor
+    func testCommandASelectsAllCardsExceptPinsAndStillSelectsSearchText() throws {
+        continueAfterFailure = false
+        let fixture = try IsolatedAppKite(test: self)
+        let app = fixture.launch()
+        openHistory(in: app)
+
+        let cards = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "clipboard-card-"))
+        for (index, value) in ["Épingle", "Première copie", "Seconde copie"].enumerated() {
+            fixture.pasteboard.clearContents()
+            XCTAssertTrue(fixture.pasteboard.setString(value, forType: .string))
+            XCTAssertTrue(cards.element(boundBy: index).waitForExistence(timeout: 8))
+        }
+
+        let pinCandidate = cards.element(boundBy: 2)
+        let pinnedID = pinCandidate.identifier
+        pinCandidate.rightClick()
+        let pin = app.menuItems["Épingler"]
+        XCTAssertTrue(pin.waitForExistence(timeout: 5))
+        pin.click()
+        let pinSection = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Épingles")
+        ).firstMatch
+        XCTAssertTrue(pinSection.waitForExistence(timeout: 5))
+
+        app.typeKey("a", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts["clipboard-selection-count"].waitForExistence(timeout: 5))
+        app.typeKey(.delete, modifierFlags: [])
+        let confirm = app.buttons["clipboard-cards-delete-confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.click()
+        let oneCard = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in cards.count == 1 }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [oneCard], timeout: 5), .completed)
+        XCTAssertEqual(cards.firstMatch.identifier, pinnedID)
+
+        let search = app.textFields["clipboard-history-search"]
+        search.click()
+        search.typeText("brouillon")
+        app.typeKey("a", modifierFlags: .command)
+        search.typeText("épingle")
+        XCTAssertEqual(search.value as? String, "épingle")
+    }
+
+    @MainActor
+    func testCommandClickAndArrowsSelectCardsForGroupDeletion() throws {
+        continueAfterFailure = false
+        let fixture = try IsolatedAppKite(test: self)
+        let app = fixture.launch()
+        openHistory(in: app)
+
+        let cards = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "clipboard-card-"))
+        for (index, value) in ["Troisième", "Deuxième", "Première"].enumerated() {
+            fixture.pasteboard.clearContents()
+            XCTAssertTrue(fixture.pasteboard.setString(value, forType: .string))
+            XCTAssertTrue(cards.element(boundBy: index).waitForExistence(timeout: 8))
+        }
+
+        app.typeKey(.leftArrow, modifierFlags: [])
+        app.typeKey(.leftArrow, modifierFlags: [])
+        app.typeKey(.rightArrow, modifierFlags: .command)
+        let selectionCount = app.staticTexts["clipboard-selection-count"]
+        XCTAssertTrue(selectionCount.waitForExistence(timeout: 5))
+        app.typeKey(.leftArrow, modifierFlags: .command)
+        XCTAssertFalse(selectionCount.exists)
+
+        let middleID = cards.element(boundBy: 1).identifier
+        let third = cards.element(boundBy: 2)
+        XCUIElement.perform(withKeyModifiers: .command) { third.click() }
+        XCTAssertTrue(selectionCount.waitForExistence(timeout: 5))
+        XCUIElement.perform(withKeyModifiers: .command) { third.click() }
+        XCTAssertFalse(selectionCount.exists)
+        XCUIElement.perform(withKeyModifiers: .command) { third.click() }
+        XCTAssertTrue(selectionCount.waitForExistence(timeout: 5))
+
+        app.typeKey(.delete, modifierFlags: [])
+        let confirm = app.buttons["clipboard-cards-delete-confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.click()
+        let oneCard = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in cards.count == 1 }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [oneCard], timeout: 5), .completed)
+        XCTAssertEqual(cards.firstMatch.identifier, middleID)
+    }
+
+    @MainActor
     func testCreateAndDeleteCollectionFromHistory() throws {
         continueAfterFailure = false
 

@@ -9,7 +9,8 @@ final class ClipboardHistoryState {
     }
 
     private(set) var entries: [ClipboardEntry] = []
-    private(set) var selectedID: UUID?
+    private(set) var focusedEntryID: UUID?
+    private(set) var selectedIDs: Set<UUID> = []
     private(set) var collections: [ClipboardCollection] = []
     private(set) var selectedCollectionID: UUID?
     var searchText = "" { didSet { changeFilters() } }
@@ -53,6 +54,11 @@ final class ClipboardHistoryState {
     @ObservationIgnored private var entriesWithoutThumbnails: Set<UUID> = []
     @ObservationIgnored private var pageLimit = ClipboardHistoryQuery.pageSize
     @ObservationIgnored private var mostRecentID: UUID?
+    @ObservationIgnored private var matchingUnpinnedIDs: [UUID] = []
+    @ObservationIgnored private var selectsAllAfterSearch = false
+    @ObservationIgnored private var selectionAnchorID: UUID?
+    @ObservationIgnored private var selectionBeforeRange: Set<UUID>?
+    @ObservationIgnored private var allowsEmptySelection = false
     @ObservationIgnored private var target: NSRunningApplication?
     @ObservationIgnored private var isPasting = false
     @ObservationIgnored private var lastReplayChangeCount: Int
@@ -108,7 +114,7 @@ final class ClipboardHistoryState {
             target = frontmost == NSRunningApplication.current ? nil : frontmost
             if selectedCollectionID != nil { selectCollection(nil) }
         }
-        selectedID = mostRecentID ?? visibleEntries.first?.id
+        selectOnly(mostRecentID ?? visibleEntries.first?.id)
         panel.showHistory(ClipboardHistoryView(history: self)) { [weak self] in
             self?.endPreviewSession()
         }
@@ -138,6 +144,7 @@ final class ClipboardHistoryState {
     }
 
     func endPreviewSession() {
+        selectsAllAfterSearch = false
         previewSession += 1
         previewPlayback.stop()
         previewRequests.reset()
@@ -152,17 +159,66 @@ final class ClipboardHistoryState {
         archiveFailure = nil
     }
 
-    func moveSelection(by offset: Int) {
+    func moveSelection(by offset: Int, extending: Bool = false) {
+        selectsAllAfterSearch = false
         let entries = visibleEntries
         guard !entries.isEmpty else { return }
-        let current = entries.firstIndex { $0.id == selectedID } ?? 0
+        let current = entries.firstIndex { $0.id == focusedEntryID } ?? 0
         let next = min(max(current + offset, 0), entries.count - 1)
-        selectedID = entries[next].id
+        guard extending else {
+            selectOnly(entries[next].id)
+            return
+        }
+
+        let anchor = entries.firstIndex { $0.id == selectionAnchorID } ?? current
+        selectionAnchorID = entries[anchor].id
+        let fixedSelection = selectionBeforeRange ?? selectedIDs.subtracting([entries[anchor].id])
+        selectionBeforeRange = fixedSelection
+        focusedEntryID = entries[next].id
+        selectedIDs = fixedSelection.union(entries[min(anchor, next)...max(anchor, next)].map(\.id))
+        allowsEmptySelection = false
+    }
+
+    func toggleSelection(_ entry: ClipboardEntry) {
+        selectsAllAfterSearch = false
+        focusedEntryID = entry.id
+        selectionAnchorID = entry.id
+        selectionBeforeRange = nil
+        if selectedIDs.remove(entry.id) == nil {
+            selectedIDs.insert(entry.id)
+        }
+        allowsEmptySelection = selectedIDs.isEmpty
+    }
+
+    func selectAllUnpinned() {
+        let awaitingStore = store == nil && collectionTask != nil
+        selectsAllAfterSearch = (isSearching || awaitingStore) && visibleEntries.isEmpty
+        guard !selectsAllAfterSearch else { return }
+        selectedIDs = Set(matchingUnpinnedIDs)
+        if focusedEntryID.map(selectedIDs.contains) != true {
+            focusedEntryID = visibleEntries.first { selectedIDs.contains($0.id) }?.id
+        }
+        selectionAnchorID = focusedEntryID
+        selectionBeforeRange = nil
+        allowsEmptySelection = selectedIDs.isEmpty
+    }
+
+    private func selectOnly(_ id: UUID?) {
+        selectsAllAfterSearch = false
+        focusedEntryID = id
+        selectionAnchorID = id
+        selectionBeforeRange = nil
+        selectedIDs = id.map { [$0] } ?? []
+        allowsEmptySelection = false
     }
 
     func pasteSelected() {
-        guard let entry = visibleEntries.first(where: { $0.id == selectedID }) else { return }
-        paste(entry)
+        if selectedIDs.count <= 1 {
+            paste(ids: Array(selectedIDs))
+            return
+        }
+        let pinned = visibleEntries.lazy.filter(\.isPinned).map(\.id)
+        paste(ids: (Array(pinned) + matchingUnpinnedIDs).filter(selectedIDs.contains))
     }
 
     var visibleEntries: [ClipboardEntry] { entries }
@@ -212,12 +268,20 @@ final class ClipboardHistoryState {
         manage(.deleteEntry(entry.id, confirmingProtection: confirmingProtection))
     }
 
+    func deleteEntries(_ ids: Set<UUID>) {
+        manage(.deleteEntries(ids))
+    }
+
     func clearUnprotectedEntries() {
         manage(.clearUnprotectedEntries)
     }
 
     func paste(_ entry: ClipboardEntry) {
-        guard !isPasting else { return }
+        paste(ids: [entry.id])
+    }
+
+    private func paste(ids: [UUID]) {
+        guard !isPasting, !ids.isEmpty else { return }
         isPasting = true
         let expectedChangeCount = pasteboard.changeCount
         let destination = target
@@ -230,12 +294,18 @@ final class ClipboardHistoryState {
             let replayID = UUID()
             let payload: ClipboardPayload
             do {
-                payload = try await store.prepareReplay(for: entry.id, replayID: replayID)
+                payload = try await store.prepareReplay(for: ids, replayID: replayID)
                 if payload.items.contains(where: { $0.fileURL != nil }) {
                     mayHaveFileReplays = true
                 }
+            } catch ClipboardHistoryStoreError.groupedReplayTooLarge {
+                panel.showNotice("Sélection trop volumineuse. Colle les cartes en plusieurs fois.")
+                return
+            } catch ClipboardHistoryStoreError.insufficientReplayCapacity {
+                panel.showNotice("Espace disque insuffisant pour coller cette sélection.")
+                return
             } catch {
-                panel.showNotice("Impossible de lire le contenu archivé de cette carte.")
+                panel.showNotice("Impossible de lire le contenu archivé de la sélection.")
                 return
             }
             let paste = PasteClipboardEntry(pasteboard: pasteboard, pasteTarget: pasteTarget)
@@ -250,15 +320,16 @@ final class ClipboardHistoryState {
                     panel.showNotice("Copié. Colle avec ⌘V.")
                 }
                 do {
-                    try await store.markUsed(id: entry.id, at: .now)
+                    try await store.markUsed(ids: ids, at: .now)
                     refreshSearch()
                 } catch {
                     if outcome == .sent {
-                        panel.showNotice("Le classement de la carte n’a pas pu être mis à jour.")
+                        panel.showNotice(
+                            "Le classement de la sélection n’a pas pu être mis à jour.")
                     }
                 }
             case .failed:
-                panel.showNotice("Impossible de copier cette carte.")
+                panel.showNotice("Impossible de copier la sélection.")
             case .clipboardChanged:
                 panel.showNotice("Le presse-papiers a changé avant le collage.")
             }
@@ -356,7 +427,10 @@ final class ClipboardHistoryState {
     ) {
         guard collectionTask == nil else { return }
         collectionTask = Task { [weak self] in
-            defer { self?.collectionTask = nil }
+            defer {
+                self?.collectionTask = nil
+                if self?.store == nil { self?.selectsAllAfterSearch = false }
+            }
             do {
                 let store = try await openStore()
                 try await self?.loadHistory(from: store)
@@ -405,7 +479,14 @@ final class ClipboardHistoryState {
 
     func loadHistory(from store: any ClipboardHistoryStore) async throws {
         self.store = store
-        try await reloadCollections(from: store)
+        isSearching = true
+        do {
+            try await reloadCollections(from: store)
+        } catch {
+            isSearching = false
+            selectsAllAfterSearch = false
+            throw error
+        }
         refreshSearch()
     }
 
@@ -514,8 +595,9 @@ final class ClipboardHistoryState {
         entries = []
         thumbnails = [:]
         entriesWithoutThumbnails.removeAll()
-        selectedID = nil
+        selectOnly(nil)
         mostRecentID = nil
+        matchingUnpinnedIDs = []
         hasMoreEntries = false
         refreshSearch()
     }
@@ -537,6 +619,7 @@ final class ClipboardHistoryState {
             } catch {
                 guard self?.searchGeneration == generation else { return }
                 self?.isSearching = false
+                self?.selectsAllAfterSearch = false
                 self?.searchMessage = "Impossible de rechercher dans l’historique."
                 return
             }
@@ -591,11 +674,27 @@ final class ClipboardHistoryState {
         entriesWithoutThumbnails.formIntersection(visibleIDs)
         sourceIdentifiers = result.sourceIdentifiers
         mostRecentID = result.mostRecentID
+        matchingUnpinnedIDs = result.matchingUnpinnedIDs
         hasMoreEntries = result.hasMoreEntries
         hasUnprotectedEntries = result.canClearHistory
         isSearching = false
-        if !entries.contains(where: { $0.id == selectedID }) {
-            selectedID = result.mostRecentID
+        if selectsAllAfterSearch {
+            selectAllUnpinned()
+            return
+        }
+        if !selectedIDs.isSubset(of: visibleIDs) {
+            let matchingIDs = visibleIDs.union(matchingUnpinnedIDs)
+            selectedIDs.formIntersection(matchingIDs)
+            selectionBeforeRange?.formIntersection(matchingIDs)
+        }
+        if selectedIDs.isEmpty && !allowsEmptySelection {
+            selectOnly(result.mostRecentID)
+        } else if focusedEntryID.map(visibleIDs.contains) != true {
+            focusedEntryID = entries.first { selectedIDs.contains($0.id) }?.id
+        }
+        if selectionAnchorID.map(visibleIDs.contains) != true {
+            selectionAnchorID = focusedEntryID
+            selectionBeforeRange = nil
         }
     }
 
@@ -729,7 +828,8 @@ final class ClipboardHistoryState {
             history.entries = [
                 pinned, color, recent, audio, folder, table, richText, link, mixed, pdf,
             ]
-            history.selectedID = recent.id
+            history.matchingUnpinnedIDs = history.entries.filter { !$0.isPinned }.map(\.id)
+            history.selectOnly(recent.id)
             history.sourceIdentifiers = [
                 ClipboardHistoryQuery.unknownSource, "com.apple.TextEdit", "com.apple.Safari",
                 "com.apple.finder", "com.apple.Numbers", "com.apple.Notes", "com.apple.Preview",

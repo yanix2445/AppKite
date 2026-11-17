@@ -45,11 +45,13 @@ nonisolated final class ClipboardSearchIndex: Sendable {
         let mostRecent = matches.first
         let pinnedLimit = mostRecent?.isPinned == false ? max(0, query.limit - 1) : query.limit
         let ordered = matches.lazy.filter(\.isPinned).prefix(pinnedLimit)
+        let unpinned = matches.lazy.filter { !$0.isPinned }
         var page = Array(ordered)
-        page.append(
-            contentsOf: matches.lazy.filter { !$0.isPinned }.prefix(query.limit - page.count))
+        page.append(contentsOf: unpinned.prefix(query.limit - page.count))
         return ClipboardHistoryResults(
-            entries: page, sourceIdentifiers: sources.sorted(), mostRecentID: mostRecent?.id,
+            entries: page, matchingUnpinnedIDs: unpinned.map(\.id),
+            sourceIdentifiers: sources.sorted(),
+            mostRecentID: mostRecent?.id,
             hasMoreEntries: matches.count > page.count, canClearHistory: canClearHistory
         )
     }

@@ -7,15 +7,15 @@ nonisolated protocol ClipboardHistoryStore: Sendable {
     func record(_ copy: ClipboardCopy, at date: Date) async throws
     func payload(for id: UUID) async throws -> ClipboardPayload
     func previewSource(for id: UUID) async throws -> ClipboardPreviewSource?
-    func prepareReplay(for id: UUID, replayID: UUID) async throws -> ClipboardPayload
+    func prepareReplay(for ids: [UUID], replayID: UUID) async throws -> ClipboardPayload
     func removeReplays(exceptKeeping replayID: UUID?) async throws
-    func markUsed(id: UUID, at date: Date) async throws
+    func markUsed(ids: [UUID], at date: Date) async throws
     func collections() async throws -> [ClipboardCollection]
     func setPinned(_ isPinned: Bool, for entryID: UUID) async throws
     func createCollection(named name: String) async throws
     func setMembership(_ isMember: Bool, for entryID: UUID, in collectionID: UUID) async throws
     func deleteCollection(id: UUID) async throws
-    func deleteEntry(id: UUID, confirmingProtection: Bool) async throws
+    func deleteEntries(ids: Set<UUID>, confirmingProtection: Bool) async throws
     func clearUnprotectedEntries() async throws
 }
 
@@ -25,5 +25,7 @@ nonisolated enum ClipboardHistoryStoreError: Error {
     case protectedEntry
     case missingEntry
     case insufficientArchiveCapacity
+    case groupedReplayTooLarge
+    case insufficientReplayCapacity
     case archiveCleanupDeferred
 }

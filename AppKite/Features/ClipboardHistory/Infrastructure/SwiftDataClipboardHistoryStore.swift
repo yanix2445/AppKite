@@ -354,12 +354,27 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
     }
 
     func prepareReplay(for id: UUID, replayID: UUID) throws -> ClipboardPayload {
-        guard let entry = try entry(id: id) else {
-            throw ClipboardHistoryStoreError.missingEntry
+        try prepareReplay(for: [id], replayID: replayID)
+    }
+
+    func prepareReplay(for ids: [UUID], replayID: UUID) throws -> ClipboardPayload {
+        guard ids.count <= ClipboardArchive.groupedReplayItemLimit else {
+            throw ClipboardHistoryStoreError.groupedReplayTooLarge
         }
-        return try entry.hasArchive
-            ? archive.makeReplay(from: id, replayID: replayID)
-            : .plainText(entry.text)
+        let entries = try ids.map { id in
+            guard let entry = try entry(id: id) else {
+                throw ClipboardHistoryStoreError.missingEntry
+            }
+            return entry
+        }
+        let archivedIDs = entries.filter(\.hasArchive).map(\.id)
+        if ids.count > 1 {
+            let legacyTexts = entries.filter { !$0.hasArchive }.map(\.text)
+            try archive.checkGroupedReplay(from: archivedIDs, legacyTexts: legacyTexts)
+        }
+        let archived = try archive.makeReplays(from: archivedIDs, replayID: replayID)
+        return try ClipboardFormatCodec.groupedReplay(
+            entries.map { archived[$0.id] ?? .plainText($0.text) })
     }
 
     func removeReplays(exceptKeeping replayID: UUID?) throws {
@@ -367,12 +382,21 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
     }
 
     func markUsed(id: UUID, at date: Date) throws {
-        guard let entry = try entry(id: id), date > entry.lastUsedAt else {
-            return
+        try markUsed(ids: [id], at: date)
+    }
+
+    func markUsed(ids: [UUID], at date: Date) throws {
+        let entries = try ids.compactMap { try entry(id: $0) }
+        var changed: [StoredClipboardEntry] = []
+        for (index, entry) in entries.enumerated() {
+            let time = date.addingTimeInterval(-Double(index) / 1_000_000)
+            guard time > entry.lastUsedAt else { continue }
+            entry.lastUsedAt = time
+            changed.append(entry)
         }
-        entry.lastUsedAt = date
+        guard !changed.isEmpty else { return }
         try save()
-        refreshIndex(for: entry)
+        for entry in changed { refreshIndex(for: entry) }
     }
 
     func collections() throws -> [ClipboardCollection] {
@@ -421,11 +445,16 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
     }
 
     func deleteEntry(id: UUID, confirmingProtection: Bool) throws {
-        guard let entry = try entry(id: id) else { return }
-        guard confirmingProtection || !entry.isProtected else {
+        try deleteEntries(ids: [id], confirmingProtection: confirmingProtection)
+    }
+
+    func deleteEntries(ids: Set<UUID>, confirmingProtection: Bool) throws {
+        let entries = try ids.compactMap { try entry(id: $0) }
+        guard confirmingProtection || entries.allSatisfy({ !$0.isProtected }) else {
             throw ClipboardHistoryStoreError.protectedEntry
         }
-        try delete([entry])
+        guard !entries.isEmpty else { return }
+        try delete(entries)
     }
 
     func clearUnprotectedEntries() throws {
