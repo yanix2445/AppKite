@@ -10,14 +10,19 @@ struct ClipboardSearchTests {
         let wanted = card(kind: .image, source: source, pinned: true)
         let wrongKind = card(kind: .pdf, source: source, pinned: true)
         let wrongSource = card(kind: .image, source: nil)
+        let laterMatch = card(kind: .image, source: source, at: -1)
         index.update(wanted, text: "Échéance du budget")
         index.update(wrongKind, text: "Échéance du budget")
         index.update(wrongSource, text: "Échéance du budget")
+        index.update(laterMatch, text: "Échéance du budget")
 
         let filters = ClipboardHistoryQuery(kind: .image, source: source)
-        #expect(try index.search(filters).entries.map(\.id) == [wanted.id])
-        let query = ClipboardHistoryQuery(text: "budget ECHEANCE", kind: .image, source: source)
-        #expect(try index.search(query).entries.map(\.id) == [wanted.id])
+        #expect(try index.search(filters).entries.map(\.id) == [wanted.id, laterMatch.id])
+        let query = ClipboardHistoryQuery(
+            text: "budget ECHEANCE", kind: .image, source: source, limit: 1)
+        let result = try index.search(query)
+        #expect(result.entries.map(\.id) == [wanted.id])
+        #expect(result.matchingUnpinnedIDs == [laterMatch.id])
         let unknown = ClipboardHistoryQuery(source: ClipboardHistoryQuery.unknownSource)
         #expect(try index.search(unknown).entries.map(\.id) == [wrongSource.id])
     }

@@ -10,6 +10,7 @@
 ## Branches
 
 - Créer une branche par chantier depuis `main` et ouvrir la PR vers `main`.
+- Utiliser le dossier AppKite existant comme unique copie de travail du dépôt. Changer de branche dans ce même dossier pour développer, compiler et tester chaque chantier.
 - Nommer la branche `type/description-courte` ou `type/numero-description-courte` quand un ticket existe. Exemple `feat/42-socle-barre-menus`.
 - Utiliser les préfixes AIDD `feat/`, `fix/`, `docs/`, `refactor/`, `chore/`, `test/` et `hotfix/`.
 

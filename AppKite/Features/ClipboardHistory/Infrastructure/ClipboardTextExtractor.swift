@@ -54,7 +54,7 @@ nonisolated enum ClipboardTextExtractor {
         return joined(texts)
     }
 
-    private static func richText(from representation: Representation) -> String? {
+    static func richText(from representation: ClipboardPayload.Representation) -> String? {
         let documentType: NSAttributedString.DocumentType
         switch representation.type {
         case PasteboardType.rtf.rawValue:

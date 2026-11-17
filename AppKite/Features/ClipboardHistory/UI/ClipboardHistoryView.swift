@@ -8,11 +8,14 @@ enum ClipboardHistoryFocus: Hashable {
 
 struct ClipboardHistoryView: View {
     static let preferredHeight: CGFloat = 300
+    // AppKit can report the physical backspace key as ASCII DEL.
+    private static let backspace = KeyEquivalent("\u{7f}")
 
     private enum Dialog {
         case createCollection
         case deleteCollection(ClipboardCollection)
         case deleteEntry(ClipboardEntry)
+        case deleteEntries(Set<UUID>)
         case clearHistory
 
         var title: LocalizedStringKey {
@@ -20,6 +23,10 @@ struct ClipboardHistoryView: View {
             case .createCollection: "Nouvelle collection"
             case .deleteCollection: "Supprimer la collection ?"
             case .deleteEntry: "Supprimer définitivement cette carte ?"
+            case .deleteEntries(let ids):
+                ids.count == 1
+                    ? "Supprimer définitivement cette carte ?"
+                    : "Supprimer définitivement ces \(ids.count) cartes ?"
             case .clearHistory: "Vider l’historique ?"
             }
         }
@@ -34,10 +41,6 @@ struct ClipboardHistoryView: View {
 
     private var selectedCollection: ClipboardCollection? {
         history.collections.first { $0.id == history.selectedCollectionID }
-    }
-
-    private var selectedEntry: ClipboardEntry? {
-        history.visibleEntries.first { $0.id == history.selectedID }
     }
 
     private var isDialogPresented: Binding<Bool> {
@@ -112,19 +115,23 @@ struct ClipboardHistoryView: View {
         .focusEffectDisabled()
         .focused($focus, equals: .cards)
         .onAppear { focus = .cards }
+        .onDisappear { history.endPreviewSession() }
         .onKeyPress("f", phases: .down) { key in
             guard dialog == nil, key.modifiers == .command else { return .ignored }
             focus = .search
             return .handled
         }
-        .onKeyPress(.leftArrow) {
-            guard dialog == nil, focus != .search else { return .ignored }
-            history.moveSelection(by: -1)
+        .onKeyPress("a", phases: .down) { key in
+            guard dialog == nil, focus != .search, key.modifiers == .command else {
+                return .ignored
+            }
+            history.selectAllUnpinned()
             return .handled
         }
-        .onKeyPress(.rightArrow) {
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { key in
             guard dialog == nil, focus != .search else { return .ignored }
-            history.moveSelection(by: 1)
+            history.moveSelection(
+                by: key.key == .leftArrow ? -1 : 1, extending: key.modifiers.contains(.command))
             return .handled
         }
         .onKeyPress(.return) {
@@ -132,11 +139,11 @@ struct ClipboardHistoryView: View {
             pasteSelected()
             return .handled
         }
-        .onKeyPress(.delete) {
-            guard dialog == nil, focus != .search, let entry = selectedEntry else {
+        .onKeyPress(keys: [.delete, .deleteForward, Self.backspace], phases: .down) { _ in
+            guard dialog == nil, focus != .search, !history.selectedIDs.isEmpty else {
                 return .ignored
             }
-            delete(entry)
+            deleteSelected()
             return .handled
         }
         .onKeyPress(.escape) {
@@ -182,21 +189,30 @@ struct ClipboardHistoryView: View {
 
     private func commands(showLabels: Bool) -> some View {
         HStack(spacing: 6) {
+            let selectedCount = history.selectedIDs.count
+            if selectedCount > 1 || (selectedCount == 1 && history.focusedEntryID == nil) {
+                Text(
+                    selectedCount == 1
+                        ? "1 carte sélectionnée" : "\(selectedCount) cartes sélectionnées"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("clipboard-selection-count")
+            }
+
             Button(action: pasteSelected) {
                 commandLabel("Coller", symbol: "return", showLabel: showLabels)
             }
             .buttonStyle(.plain)
-            .disabled(history.selectedID == nil)
-            .help("Coller la carte sélectionnée (↩)")
+            .disabled(history.selectedIDs.isEmpty)
+            .help("Coller la sélection (↩)")
 
-            Button {
-                if let selectedEntry { delete(selectedEntry) }
-            } label: {
+            Button(action: deleteSelected) {
                 commandLabel("Supprimer", symbol: "delete.left", showLabel: showLabels)
             }
             .buttonStyle(.plain)
-            .disabled(selectedEntry == nil)
-            .help("Supprimer la carte sélectionnée (⌫)")
+            .disabled(history.selectedIDs.isEmpty)
+            .help("Supprimer la sélection (⌫)")
         }
         .fixedSize()
     }
@@ -367,6 +383,17 @@ struct ClipboardHistoryView: View {
         }
     }
 
+    private func deleteSelected() {
+        let ids = history.selectedIDs
+        guard !ids.isEmpty else { return }
+        if ids.count == 1, let entry = history.visibleEntries.first(where: { ids.contains($0.id) })
+        {
+            delete(entry)
+        } else {
+            dialog = .deleteEntries(ids)
+        }
+    }
+
     @ViewBuilder
     private func dialogActions(_ dialog: Dialog) -> some View {
         Button("Annuler", role: .cancel) {}
@@ -389,6 +416,11 @@ struct ClipboardHistoryView: View {
                 history.deleteEntry(entry, confirmingProtection: true)
             }
             .accessibilityIdentifier("clipboard-card-delete-confirm")
+        case .deleteEntries(let ids):
+            Button("Supprimer", role: .destructive) {
+                history.deleteEntries(ids)
+            }
+            .accessibilityIdentifier("clipboard-cards-delete-confirm")
         case .clearHistory:
             Button("Vider l’historique", role: .destructive) {
                 history.clearUnprotectedEntries()
@@ -406,6 +438,8 @@ struct ClipboardHistoryView: View {
             Text("Les cartes restent dans l’historique et dans leurs autres collections.")
         case .deleteEntry:
             Text("La carte sera retirée de l’historique et de ses collections.")
+        case .deleteEntries:
+            Text("La sélection sera retirée de l’historique et des collections.")
         case .clearHistory:
             Text("Les cartes épinglées ou classées dans une collection sont conservées.")
         }
@@ -473,10 +507,10 @@ struct ClipboardHistoryView: View {
                 .padding(inset)
             }
             .scrollIndicators(.never)
-            .onChange(of: history.selectedID, initial: true) { _, selection in
-                guard let selection, entries.contains(where: { $0.id == selection }) else { return }
+            .onChange(of: history.focusedEntryID, initial: true) { _, entryID in
+                guard let entryID, entries.contains(where: { $0.id == entryID }) else { return }
                 withAnimation(reduceMotion ? nil : .snappy(duration: 0.22)) {
-                    proxy.scrollTo(selection)
+                    proxy.scrollTo(entryID)
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -484,18 +518,44 @@ struct ClipboardHistoryView: View {
     }
 
     private func card(for entry: ClipboardEntry, height: CGFloat) -> some View {
-        let isSelected = entry.id == history.selectedID
-        return Button {
-            history.paste(entry)
-        } label: {
-            ClipboardHistoryCardView(
-                entry: entry, thumbnail: history.thumbnails[entry.id] ?? entry.thumbnail,
-                height: height, isSelected: isSelected
-            )
+        let isSelected = history.selectedIDs.contains(entry.id)
+        let preview: ClipboardPreview? =
+            switch history.previewRequests.results[entry.id] {
+            case .ready(let preview): preview
+            default: nil
+            }
+        return ZStack {
+            Button {
+                activateCard(entry) {
+                    history.paste(entry)
+                }
+            } label: {
+                ClipboardHistoryCardView(
+                    entry: entry, thumbnail: history.thumbnails[entry.id] ?? entry.thumbnail,
+                    height: height, isSelected: isSelected, archivedPreview: preview,
+                    isLoadingPreview: history.isLoadingPreview(for: entry),
+                    playback: history.previewPlayback
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("clipboard-card-\(entry.id.uuidString)")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            .accessibilityAction(named: isSelected ? Text("Désélectionner") : Text("Sélectionner"))
+            {
+                toggleSelection(entry)
+            }
+            if let media = preview?.media {
+                ClipboardPlaybackButton(
+                    playback: history.previewPlayback, media: media, entryID: entry.id
+                ) {
+                    activateCard(entry) {
+                        history.previewPlayback.toggle(media, for: entry.id)
+                    }
+                }
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("clipboard-card-\(entry.id.uuidString)")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .task(id: history.previewSession) { history.requestPreview(for: entry) }
+        .onDisappear { history.hidePreview(for: entry.id) }
         .contextMenu {
             let pinTitle: LocalizedStringKey = entry.isPinned ? "Désépingler" : "Épingler"
             Button(pinTitle) {
@@ -526,5 +586,18 @@ struct ClipboardHistoryView: View {
             Button(deleteTitle, role: .destructive) { delete(entry) }
                 .accessibilityIdentifier("clipboard-card-delete")
         }
+    }
+
+    private func activateCard(_ entry: ClipboardEntry, action: () -> Void) {
+        if NSApp.currentEvent?.modifierFlags.contains(.command) == true {
+            toggleSelection(entry)
+        } else {
+            action()
+        }
+    }
+
+    private func toggleSelection(_ entry: ClipboardEntry) {
+        history.toggleSelection(entry)
+        focus = .cards
     }
 }

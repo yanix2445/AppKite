@@ -1,6 +1,94 @@
+import AppKit
 import XCTest
 
 final class ClipboardHistoryUITests: XCTestCase {
+    @MainActor
+    func testCommandASelectsAllCardsExceptPinsAndStillSelectsSearchText() throws {
+        continueAfterFailure = false
+        let fixture = try IsolatedAppKite(test: self)
+        let app = fixture.launch()
+        openHistory(in: app)
+
+        let cards = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "clipboard-card-"))
+        for (index, value) in ["Épingle", "Première copie", "Seconde copie"].enumerated() {
+            fixture.pasteboard.clearContents()
+            XCTAssertTrue(fixture.pasteboard.setString(value, forType: .string))
+            XCTAssertTrue(cards.element(boundBy: index).waitForExistence(timeout: 8))
+        }
+
+        let pinCandidate = cards.element(boundBy: 2)
+        let pinnedID = pinCandidate.identifier
+        pinCandidate.rightClick()
+        let pin = app.menuItems["Épingler"]
+        XCTAssertTrue(pin.waitForExistence(timeout: 5))
+        pin.click()
+        let pinSection = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Épingles")
+        ).firstMatch
+        XCTAssertTrue(pinSection.waitForExistence(timeout: 5))
+
+        app.typeKey("a", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts["clipboard-selection-count"].waitForExistence(timeout: 5))
+        app.typeKey(.delete, modifierFlags: [])
+        let confirm = app.buttons["clipboard-cards-delete-confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.click()
+        let oneCard = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in cards.count == 1 }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [oneCard], timeout: 5), .completed)
+        XCTAssertEqual(cards.firstMatch.identifier, pinnedID)
+
+        let search = app.textFields["clipboard-history-search"]
+        search.click()
+        search.typeText("brouillon")
+        app.typeKey("a", modifierFlags: .command)
+        search.typeText("épingle")
+        XCTAssertEqual(search.value as? String, "épingle")
+    }
+
+    @MainActor
+    func testCommandClickAndArrowsSelectCardsForGroupDeletion() throws {
+        continueAfterFailure = false
+        let fixture = try IsolatedAppKite(test: self)
+        let app = fixture.launch()
+        openHistory(in: app)
+
+        let cards = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "clipboard-card-"))
+        for (index, value) in ["Troisième", "Deuxième", "Première"].enumerated() {
+            fixture.pasteboard.clearContents()
+            XCTAssertTrue(fixture.pasteboard.setString(value, forType: .string))
+            XCTAssertTrue(cards.element(boundBy: index).waitForExistence(timeout: 8))
+        }
+
+        app.typeKey(.leftArrow, modifierFlags: [])
+        app.typeKey(.leftArrow, modifierFlags: [])
+        app.typeKey(.rightArrow, modifierFlags: .command)
+        let selectionCount = app.staticTexts["clipboard-selection-count"]
+        XCTAssertTrue(selectionCount.waitForExistence(timeout: 5))
+        app.typeKey(.leftArrow, modifierFlags: .command)
+        XCTAssertFalse(selectionCount.exists)
+
+        let middleID = cards.element(boundBy: 1).identifier
+        let third = cards.element(boundBy: 2)
+        XCUIElement.perform(withKeyModifiers: .command) { third.click() }
+        XCTAssertTrue(selectionCount.waitForExistence(timeout: 5))
+        XCUIElement.perform(withKeyModifiers: .command) { third.click() }
+        XCTAssertFalse(selectionCount.exists)
+        XCUIElement.perform(withKeyModifiers: .command) { third.click() }
+        XCTAssertTrue(selectionCount.waitForExistence(timeout: 5))
+
+        app.typeKey(.delete, modifierFlags: [])
+        let confirm = app.buttons["clipboard-cards-delete-confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.click()
+        let oneCard = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in cards.count == 1 }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [oneCard], timeout: 5), .completed)
+        XCTAssertEqual(cards.firstMatch.identifier, middleID)
+    }
+
     @MainActor
     func testCreateAndDeleteCollectionFromHistory() throws {
         continueAfterFailure = false
@@ -83,6 +171,110 @@ final class ClipboardHistoryUITests: XCTestCase {
             allTypes.click()
         }
         XCTAssertTrue(historyEmpty.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testArchivedAudioPlaysInsideTheCardAfterOriginalRemoval() throws {
+        continueAfterFailure = false
+        let fixture = try IsolatedAppKite(test: self)
+        let audio = fixture.directory.appending(path: "Note vocale.wav")
+        try silentWave(seconds: 20).write(to: audio)
+        let app = fixture.launch()
+        openHistory(in: app)
+
+        fixture.pasteboard.clearContents()
+        XCTAssertTrue(fixture.pasteboard.writeObjects([audio as NSURL]))
+        let play = app.buttons["clipboard-media-playback"].firstMatch
+        XCTAssertTrue(play.waitForExistence(timeout: 12))
+        try FileManager.default.removeItem(at: audio)
+
+        app.terminate()
+        fixture.launch()
+        openHistory(in: app)
+        XCTAssertTrue(play.waitForExistence(timeout: 12))
+        XCTAssertEqual(play.value as? String, "Arrêté")
+        play.click()
+        let playing = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "En cours de lecture"), object: play)
+        XCTAssertEqual(XCTWaiter.wait(for: [playing], timeout: 5), .completed)
+        XCTAssertTrue(app.textFields["clipboard-history-search"].exists)
+
+        app.typeKey(.escape, modifierFlags: [])
+        let closed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: play)
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 5), .completed)
+        openHistory(in: app)
+        XCTAssertTrue(play.waitForExistence(timeout: 12))
+        XCTAssertEqual(play.value as? String, "Arrêté")
+    }
+
+    @MainActor
+    func testArchivedGIFPlaysAfterOriginalRemovalAndRelaunch() throws {
+        try verifyArchivedPlayback(of: "Animation", fileExtension: "gif")
+    }
+
+    @MainActor
+    func testArchivedMoviePlaysAfterOriginalRemovalAndRelaunch() throws {
+        try verifyArchivedPlayback(of: "Capture", fileExtension: "mov")
+    }
+
+    @MainActor
+    private func verifyArchivedPlayback(of name: String, fileExtension: String) throws {
+        continueAfterFailure = false
+        let bundle = Bundle(for: Self.self)
+        let media = try XCTUnwrap(
+            bundle.url(forResource: name, withExtension: fileExtension)
+                ?? bundle.url(
+                    forResource: name, withExtension: fileExtension, subdirectory: "PreviewFixtures"
+                ))
+        let fixture = try IsolatedAppKite(test: self)
+        let original = fixture.directory.appending(path: media.lastPathComponent)
+        try FileManager.default.copyItem(at: media, to: original)
+        let app = fixture.launch()
+        openHistory(in: app)
+
+        fixture.pasteboard.clearContents()
+        XCTAssertTrue(fixture.pasteboard.writeObjects([original as NSURL]))
+        let play = app.buttons["clipboard-media-playback"].firstMatch
+        XCTAssertTrue(play.waitForExistence(timeout: 12))
+        try FileManager.default.removeItem(at: original)
+
+        app.terminate()
+        fixture.launch()
+        openHistory(in: app)
+        XCTAssertTrue(play.waitForExistence(timeout: 12))
+        XCTAssertEqual(play.value as? String, "Arrêté")
+        play.click()
+        let playState = NSPredicate(format: "value == %@", "En cours de lecture")
+        XCTAssertTrue(playState.evaluate(with: play))
+        let finished = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Arrêté"), object: play)
+        XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 10), .completed)
+        XCTAssertFalse(app.staticTexts["Lecture indisponible"].exists)
+        XCTAssertTrue(app.textFields["clipboard-history-search"].exists)
+    }
+
+    private func silentWave(seconds: UInt32) -> Data {
+        let sampleRate: UInt32 = 8_000
+        let byteCount = sampleRate * seconds * 2
+        var data = Data("RIFF".utf8)
+        func append<T: FixedWidthInteger>(_ number: T) {
+            var littleEndian = number.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+        append(byteCount + 36)
+        data.append(contentsOf: "WAVEfmt ".utf8)
+        append(UInt32(16))
+        append(UInt16(1))
+        append(UInt16(1))
+        append(sampleRate)
+        append(sampleRate * 2)
+        append(UInt16(2))
+        append(UInt16(16))
+        data.append(contentsOf: "data".utf8)
+        append(byteCount)
+        data.append(Data(count: Int(byteCount)))
+        return data
     }
 
     @MainActor

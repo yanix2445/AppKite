@@ -18,6 +18,7 @@ nonisolated struct ClipboardHistoryQuery: Sendable, Equatable {
 
 nonisolated struct ClipboardHistoryResults: Sendable {
     let entries: [ClipboardEntry]
+    let matchingUnpinnedIDs: [UUID]
     let sourceIdentifiers: [String]
     let mostRecentID: UUID?
     let hasMoreEntries: Bool

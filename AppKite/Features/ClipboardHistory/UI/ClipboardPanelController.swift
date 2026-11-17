@@ -16,15 +16,17 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     private var noticePanel: NSPanel?
     private var noticeTask: Task<Void, Never>?
     private var historyScreen: NSScreen?
+    private var onHistoryClosed: (() -> Void)?
 
     var isHistoryVisible: Bool {
         guard let panel = historyPanel else { return false }
         return panel.isVisible && panel.occlusionState.contains(.visible)
     }
 
-    func showHistory(_ view: ClipboardHistoryView) {
+    func showHistory(_ view: ClipboardHistoryView, onClose: @escaping () -> Void) {
         guard let screen = screenUnderPointer() else { return }
         historyScreen = screen
+        onHistoryClosed = onClose
         noticePanel?.orderOut(nil)
         let area = screen.frame
         let frame = NSRect(
@@ -47,6 +49,9 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         guard let panel = historyPanel else { return }
         panel.orderOut(nil)
         panel.contentView = nil
+        let onClose = onHistoryClosed
+        onHistoryClosed = nil
+        onClose?()
     }
 
     func windowDidResignKey(_ notification: Notification) {

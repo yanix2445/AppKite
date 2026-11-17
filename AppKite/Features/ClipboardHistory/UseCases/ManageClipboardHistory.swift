@@ -7,6 +7,7 @@ nonisolated struct ManageClipboardHistory: Sendable {
         case setMembership(Bool, entryID: UUID, collectionID: UUID)
         case deleteCollection(UUID)
         case deleteEntry(UUID, confirmingProtection: Bool)
+        case deleteEntries(Set<UUID>)
         case clearUnprotectedEntries
     }
 
@@ -23,7 +24,9 @@ nonisolated struct ManageClipboardHistory: Sendable {
         case .deleteCollection(let id):
             try await store.deleteCollection(id: id)
         case .deleteEntry(let id, let confirmingProtection):
-            try await store.deleteEntry(id: id, confirmingProtection: confirmingProtection)
+            try await store.deleteEntries(ids: [id], confirmingProtection: confirmingProtection)
+        case .deleteEntries(let ids):
+            try await store.deleteEntries(ids: ids, confirmingProtection: true)
         case .clearUnprotectedEntries:
             try await store.clearUnprotectedEntries()
         }
