@@ -6,6 +6,9 @@ struct ClipboardHistoryCardView: View {
     let thumbnail: Data?
     let height: CGFloat
     let isSelected: Bool
+    var archivedPreview: ClipboardPreview? = nil
+    var isLoadingPreview = false
+    var playback: ClipboardPreviewPlayback? = nil
     @Environment(\.colorScheme) private var colorScheme
 
     static let width: CGFloat = 196
@@ -46,7 +49,7 @@ struct ClipboardHistoryCardView: View {
         let ink = source?.headerInk ?? entry.kind.cardHeaderInk
         return HStack(spacing: 5) {
             VStack(alignment: .leading, spacing: 0) {
-                Text(entry.kind.cardHeaderTitle)
+                Text(headerTitle)
                     .font(.system(size: 12, weight: .bold))
                     .lineLimit(1)
                 HStack(spacing: 3) {
@@ -94,9 +97,30 @@ struct ClipboardHistoryCardView: View {
         .background(source?.headerColor ?? entry.kind.cardHeaderColor, in: .rect)
     }
 
+    private var headerTitle: LocalizedStringKey {
+        switch archivedPreview?.kind {
+        case .image: entry.kind == .image ? "Image copiée" : "Image"
+        case .document: entry.kind == .pdf ? "PDF" : "Document"
+        case .table: "Tableur"
+        case .folder: "Dossier"
+        case .selection: entry.kind == .files ? "Fichier" : "Sélection"
+        case .audio: "Audio"
+        case .video: "Vidéo"
+        case nil: entry.kind.cardHeaderTitle
+        }
+    }
+
     @ViewBuilder
     private var preview: some View {
-        if entry.kind == .pdf, let thumbnail, let image = NSImage(data: thumbnail) {
+        if let archivedPreview {
+            let active = playback?.activeID == entry.id ? playback : nil
+            ClipboardArchivedPreviewView(preview: archivedPreview, playback: active)
+                .accessibilityIdentifier("clipboard-archive-preview")
+        } else if isLoadingPreview && thumbnail == nil && entry.tablePreviewRows.isEmpty {
+            ProgressView("Chargement de l’aperçu")
+                .controlSize(.small)
+                .labelStyle(.iconOnly)
+        } else if entry.kind == .pdf, let thumbnail, let image = NSImage(data: thumbnail) {
             VStack(spacing: 5) {
                 Image(nsImage: image)
                     .resizable()
@@ -115,7 +139,7 @@ struct ClipboardHistoryCardView: View {
             GeometryReader { proxy in
                 Image(nsImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: entry.kind == .image ? .fill : .fit)
+                    .scaledToFit()
                     .frame(width: proxy.size.width, height: proxy.size.height)
             }
             .padding(entry.kind == .image ? 0 : 9)
@@ -164,7 +188,70 @@ struct ClipboardHistoryCardView: View {
         }
     }
 
+    @ViewBuilder
     private var footer: some View {
+        if let archivedPreview {
+            archivedFooter(archivedPreview)
+        } else {
+            summaryFooter
+        }
+    }
+
+    private func archivedFooter(_ preview: ClipboardPreview) -> some View {
+        let details = previewDetails(preview)
+        return HStack(spacing: 5) {
+            VStack(alignment: .leading, spacing: 3) {
+                if let name = preview.name, !name.isEmpty {
+                    Text(verbatim: name)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.primary)
+                        .help(name)
+                }
+                if !details.isEmpty {
+                    Text(verbatim: details)
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+            if !entry.collectionIDs.isEmpty {
+                Image(systemName: "folder").accessibilityLabel("Dans une collection")
+            }
+            if entry.isPinned {
+                Image(systemName: "pin.fill").accessibilityLabel("Épinglée")
+            }
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .frame(height: preview.name == nil ? 23 : 40)
+    }
+
+    private func previewDetails(_ preview: ClipboardPreview) -> String {
+        var parts = [preview.format].compactMap { $0 }
+        if case .picture(let picture) = preview.content,
+            let width = picture.pixelWidth, let height = picture.pixelHeight
+        {
+            parts.append("\(width.formatted()) × \(height.formatted()) px")
+        }
+        if case .mosaic(_, let count) = preview.content {
+            parts.append(count == 1 ? "1 élément" : "\(count.formatted()) éléments")
+        }
+        if let bytes = preview.byteCount {
+            parts.append(bytes.formatted(.byteCount(style: .file)))
+        }
+        if let duration = preview.media?.duration, duration.isFinite, duration >= 0,
+            duration <= Double(Int32.max)
+        {
+            parts.append(Duration.seconds(duration).formatted(.time(pattern: .minuteSecond)))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var summaryFooter: some View {
         HStack(spacing: 7) {
             switch entry.kind {
             case .text, .richText:
@@ -214,7 +301,7 @@ struct ClipboardHistoryCardView: View {
     }
 }
 
-private struct ClipboardTablePreviewView: View {
+struct ClipboardTablePreviewView: View {
     let rows: [[String]]
 
     var body: some View {

@@ -157,6 +157,9 @@ final class PasteboardClient {
             for type in item.types where ClipboardFormatCodec.supports(type.rawValue) {
                 // File URLs are replaced with archive URLs during replay. Preserve no stale alias.
                 if fileURL != nil, type == .URL { continue }
+                if fileURL != nil, ClipboardMediaPreview.supportsRepresentation(type.rawValue) {
+                    continue
+                }
                 guard let data = item.data(forType: type) else {
                     didFailToRead = true
                     continue

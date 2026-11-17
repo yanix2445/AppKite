@@ -6,6 +6,7 @@ nonisolated protocol ClipboardHistoryStore: Sendable {
     func indexNextPendingEntry() async throws -> Bool
     func record(_ copy: ClipboardCopy, at date: Date) async throws
     func payload(for id: UUID) async throws -> ClipboardPayload
+    func previewSource(for id: UUID) async throws -> ClipboardPreviewSource?
     func prepareReplay(for id: UUID, replayID: UUID) async throws -> ClipboardPayload
     func removeReplays(exceptKeeping replayID: UUID?) async throws
     func markUsed(id: UUID, at date: Date) async throws

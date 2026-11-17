@@ -170,6 +170,7 @@ nonisolated enum ClipboardFormatCodec {
         if richTextTypes.contains(type) { return .richText }
         if tabularTypes.contains(type) || isNativeSpreadsheetType(type) { return .spreadsheet }
         if let contentType = UTType(type), contentType.conforms(to: .image) { return .image }
+        if ClipboardMediaPreview.supportsRepresentation(type) { return .mixed }
         return nil
     }
 

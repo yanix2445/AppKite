@@ -526,6 +526,7 @@ struct ClipboardHistoryPolicyTests {
         func payload(for id: UUID) throws -> ClipboardPayload {
             throw ClipboardHistoryStoreError.missingEntry
         }
+        func previewSource(for id: UUID) -> ClipboardPreviewSource? { nil }
         func prepareReplay(for id: UUID, replayID: UUID) throws -> ClipboardPayload {
             try payload(for: id)
         }

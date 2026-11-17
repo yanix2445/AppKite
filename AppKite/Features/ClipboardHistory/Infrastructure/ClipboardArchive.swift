@@ -368,6 +368,22 @@ nonisolated struct ClipboardArchive: Sendable {
         try load(from: itemDirectory(in: root, id: id), copyingFilesTo: nil)
     }
 
+    func previewSource(for id: UUID) throws -> ClipboardPreviewSource {
+        let directory = itemDirectory(in: root, id: id)
+        let manifest = try readManifest(in: directory)
+        let items = try manifest.items.enumerated().map { index, item in
+            try Task.checkCancellation()
+            let container = itemContainer(in: directory, index: index)
+            return ClipboardPreviewSource.Item(
+                fileURL: item.fileName.map { fileURL(in: container, named: $0) },
+                representations: item.types.enumerated().map { index, type in
+                    .init(type: type, url: representationURL(in: container, index: index))
+                }
+            )
+        }
+        return ClipboardPreviewSource(items: items)
+    }
+
     func makeReplay(from id: UUID, replayID: UUID) throws -> ClipboardPayload {
         let directory = itemDirectory(in: replays, id: replayID)
         do {

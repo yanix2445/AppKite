@@ -97,6 +97,34 @@ struct ClipboardFormatTests {
         #expect(payload.items[0].representations[0].data == png)
     }
 
+    @Test func `Direct audiovisual representations keep their bytes and take priority over text`()
+        throws
+    {
+        let movie = Representation(type: UTType.quickTimeMovie.identifier, data: Data([8, 9, 10]))
+        let audio = Representation(type: UTType.mpeg4Audio.identifier, data: Data([1, 2, 3]))
+        let text = representation(.string, "Description du média")
+        let payload = try roundTrip([.init(representations: [movie, text, audio])])
+
+        #expect(ClipboardFormatCodec.presentation(for: payload).kind == .mixed)
+        let media = payload.items[0].representations.filter { $0 == movie || $0 == audio }
+        #expect(media == [movie, audio])
+    }
+
+    @Test func `A media file URL stays a file when Finder supplies media bytes too`() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appending(path: "Capture.mov")
+        let bytes = Data([1, 2, 3])
+        try bytes.write(to: url)
+        let movie = Representation(type: UTType.quickTimeMovie.identifier, data: bytes)
+        let payload = try roundTrip(
+            [.init(representations: [movie], fileURL: url)],
+            expected: [.init(representations: [], fileURL: url)])
+
+        #expect(payload.items[0].representations.isEmpty)
+        #expect(ClipboardFormatCodec.presentation(for: payload).kind == .files)
+    }
+
     @Test func `A Finder selection preserves both file URLs and their order`() throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }

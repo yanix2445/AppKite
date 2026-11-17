@@ -340,6 +340,19 @@ actor SwiftDataClipboardHistoryStore: ModelActor, ClipboardHistoryStore {
         return try entry.hasArchive ? archive.load(id: id) : .plainText(entry.text)
     }
 
+    func previewSource(for id: UUID) async throws -> ClipboardPreviewSource? {
+        guard let entry = try entry(id: id), entry.hasArchive else { return nil }
+        let archive = archive
+        let task = Task.detached(priority: .utility) {
+            try archive.previewSource(for: id)
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     func prepareReplay(for id: UUID, replayID: UUID) throws -> ClipboardPayload {
         guard let entry = try entry(id: id) else {
             throw ClipboardHistoryStoreError.missingEntry

@@ -20,6 +20,7 @@ final class ClipboardHistoryState {
     private(set) var hasUnprotectedEntries = false
     private(set) var isSearching = false
     private(set) var thumbnails: [UUID: Data] = [:]
+    private(set) var previewSession = 0
     private(set) var shortcut: ClipboardShortcut
     private(set) var collectionPause: ClipboardCollectionPause?
     private(set) var excludedApplications: [ClipboardExcludedApplication] = []
@@ -39,6 +40,8 @@ final class ClipboardHistoryState {
     @ObservationIgnored private let pasteboard: PasteboardClient
     @ObservationIgnored private let pasteTarget = AppKitPasteTarget()
     @ObservationIgnored private let panel = ClipboardPanelController()
+    @ObservationIgnored let previewRequests = ClipboardPreviewRequests()
+    @ObservationIgnored let previewPlayback = ClipboardPreviewPlayback()
     @ObservationIgnored private let preferences: ClipboardPreferences
     @ObservationIgnored private var store: (any ClipboardHistoryStore)?
     @ObservationIgnored private var collectionTask: Task<Void, Never>?
@@ -106,7 +109,9 @@ final class ClipboardHistoryState {
             if selectedCollectionID != nil { selectCollection(nil) }
         }
         selectedID = mostRecentID ?? visibleEntries.first?.id
-        panel.showHistory(ClipboardHistoryView(history: self))
+        panel.showHistory(ClipboardHistoryView(history: self)) { [weak self] in
+            self?.endPreviewSession()
+        }
         refreshSearch()
     }
 
@@ -120,6 +125,27 @@ final class ClipboardHistoryState {
             _ = target.activate(from: NSRunningApplication.current, options: [])
         }
         target = nil
+    }
+
+    func requestPreview(for entry: ClipboardEntry) {
+        guard let store, entries.contains(where: { $0.id == entry.id }) else { return }
+        previewRequests.show(entry, store: store)
+    }
+
+    func hidePreview(for id: UUID) {
+        previewRequests.hide(id)
+        if previewPlayback.activeID == id { previewPlayback.stop() }
+    }
+
+    func endPreviewSession() {
+        previewSession += 1
+        previewPlayback.stop()
+        previewRequests.reset()
+    }
+
+    func isLoadingPreview(for entry: ClipboardEntry) -> Bool {
+        store != nil && ClipboardPreviewRequests.needsPreview(entry)
+            && previewRequests.results[entry.id] == nil
     }
 
     func dismissArchiveFailure() {
@@ -483,6 +509,7 @@ final class ClipboardHistoryState {
     }
 
     private func changeFilters() {
+        endPreviewSession()
         pageLimit = ClipboardHistoryQuery.pageSize
         entries = []
         thumbnails = [:]
@@ -554,8 +581,12 @@ final class ClipboardHistoryState {
     }
 
     private func apply(_ result: ClipboardHistoryResults) {
+        let visibleIDs = Set(result.entries.map(\.id))
+        for entry in entries where !visibleIDs.contains(entry.id) {
+            previewRequests.remove(entry.id)
+            if previewPlayback.activeID == entry.id { previewPlayback.stop() }
+        }
         entries = result.entries
-        let visibleIDs = Set(entries.map(\.id))
         thumbnails = thumbnails.filter { visibleIDs.contains($0.key) }
         entriesWithoutThumbnails.formIntersection(visibleIDs)
         sourceIdentifiers = result.sourceIdentifiers
@@ -662,7 +693,42 @@ final class ClipboardHistoryState {
                 sourceBundleIdentifier: "com.apple.Preview",
                 lastUsedAt: .now.addingTimeInterval(-300), kind: .pdf
             )
-            history.entries = [pinned, color, recent, link, folder, table, richText, mixed, pdf]
+            let audio = ClipboardEntry(
+                id: UUID(), text: "Note vocale.m4a", sourceBundleIdentifier: "com.apple.finder",
+                lastUsedAt: .now.addingTimeInterval(-45), kind: .files
+            )
+            if let photo, let bitmap = NSBitmapImageRep(data: photo),
+                let png = bitmap.representation(using: .png, properties: [:])
+            {
+                let picture = ClipboardPreview.Picture(
+                    png: png, pixelWidth: bitmap.pixelsWide, pixelHeight: bitmap.pixelsHigh)
+                history.previewRequests.seed(
+                    .init(kind: .image, content: .picture(picture), format: "Image"), for: recent.id
+                )
+                history.previewRequests.seed(
+                    .init(
+                        kind: .folder,
+                        content: .mosaic(
+                            tiles: [
+                                .init(name: "Lac.heic", picture: picture),
+                                .init(name: "Budget.csv", picture: nil),
+                            ], count: 2),
+                        name: "Dossier Projet"
+                    ), for: folder.id)
+            }
+            history.previewRequests.seed(
+                .init(
+                    kind: .audio,
+                    content: .waveform(
+                        (0..<48).map { index in
+                            0.2 + 0.75 * abs(sin(Float(index) * 0.28) * cos(Float(index) * 0.11))
+                        }),
+                    name: "Note vocale.m4a", format: "M4A", byteCount: 612_000,
+                    media: .init(kind: .audio, url: URL(fileURLWithPath: "/dev/null"), duration: 36)
+                ), for: audio.id)
+            history.entries = [
+                pinned, color, recent, audio, folder, table, richText, link, mixed, pdf,
+            ]
             history.selectedID = recent.id
             history.sourceIdentifiers = [
                 ClipboardHistoryQuery.unknownSource, "com.apple.TextEdit", "com.apple.Safari",

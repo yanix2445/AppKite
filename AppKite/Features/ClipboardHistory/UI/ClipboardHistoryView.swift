@@ -112,6 +112,7 @@ struct ClipboardHistoryView: View {
         .focusEffectDisabled()
         .focused($focus, equals: .cards)
         .onAppear { focus = .cards }
+        .onDisappear { history.endPreviewSession() }
         .onKeyPress("f", phases: .down) { key in
             guard dialog == nil, key.modifiers == .command else { return .ignored }
             focus = .search
@@ -485,17 +486,32 @@ struct ClipboardHistoryView: View {
 
     private func card(for entry: ClipboardEntry, height: CGFloat) -> some View {
         let isSelected = entry.id == history.selectedID
-        return Button {
-            history.paste(entry)
-        } label: {
-            ClipboardHistoryCardView(
-                entry: entry, thumbnail: history.thumbnails[entry.id] ?? entry.thumbnail,
-                height: height, isSelected: isSelected
-            )
+        let preview: ClipboardPreview? =
+            switch history.previewRequests.results[entry.id] {
+            case .ready(let preview): preview
+            default: nil
+            }
+        return ZStack {
+            Button {
+                history.paste(entry)
+            } label: {
+                ClipboardHistoryCardView(
+                    entry: entry, thumbnail: history.thumbnails[entry.id] ?? entry.thumbnail,
+                    height: height, isSelected: isSelected, archivedPreview: preview,
+                    isLoadingPreview: history.isLoadingPreview(for: entry),
+                    playback: history.previewPlayback
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("clipboard-card-\(entry.id.uuidString)")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            if let media = preview?.media {
+                ClipboardPlaybackButton(
+                    playback: history.previewPlayback, media: media, entryID: entry.id)
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("clipboard-card-\(entry.id.uuidString)")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .task(id: history.previewSession) { history.requestPreview(for: entry) }
+        .onDisappear { history.hidePreview(for: entry.id) }
         .contextMenu {
             let pinTitle: LocalizedStringKey = entry.isPinned ? "Désépingler" : "Épingler"
             Button(pinTitle) {

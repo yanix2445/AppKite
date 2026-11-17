@@ -32,7 +32,8 @@ nonisolated enum ClipboardTextDecoding {
         for trailingBytes in 0...min(3, data.count) {
             if let value = String(data: data.dropLast(trailingBytes), encoding: encoding) {
                 // A complete scalar at the limit may still be part of an unfinished grapheme.
-                return String(value.dropLast())
+                // Keep a complete row terminator even when the next row is clipped.
+                return value.last?.isNewline == true ? value : String(value.dropLast())
             }
         }
         return nil
