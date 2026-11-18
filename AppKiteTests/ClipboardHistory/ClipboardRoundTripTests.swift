@@ -79,9 +79,9 @@ struct ClipboardRoundTripTests {
         let latestChangeCount = pasteboard.clearContents()
         try #require(pasteboard.setString("Nouvelle copie", forType: .string))
 
-        let paste = PasteClipboardEntry(pasteboard: client, pasteTarget: AppKitPasteTarget())
+        let paste = ClipboardHistoryComposition.makePaste(pasteboard: client)
         let outcome = await paste(
-            text: "Ancienne carte", target: nil, replacing: expectedChangeCount)
+            text: "Ancienne carte", replacing: expectedChangeCount)
 
         #expect(outcome == .clipboardChanged)
         #expect(pasteboard.changeCount == latestChangeCount)
@@ -111,9 +111,9 @@ struct ClipboardRoundTripTests {
         #expect(copy.text == "Café\nDeuxième ligne")
         #expect(copy.sourceBundleIdentifier == nil)
 
-        let paste = PasteClipboardEntry(pasteboard: client, pasteTarget: AppKitPasteTarget())
+        let paste = ClipboardHistoryComposition.makePaste(pasteboard: client)
         let outcome = await paste(
-            text: "Texte de repli", target: nil, replacing: client.changeCount)
+            text: "Texte de repli", replacing: client.changeCount)
         #expect(outcome == .copied)
         #expect(pasteboard.string(forType: .string) == "Texte de repli")
         #expect(client.poll() == nil)

@@ -140,7 +140,7 @@ struct ClipboardHistoryPolicyTests {
         let (writes, written) = AsyncStream<ArchiveWrite>.makeStream()
         let (gate, releaseFirstWrite) = AsyncStream<Void>.makeStream()
         let store = ArchiveFixture(writes: written, gate: gate)
-        let history = ClipboardHistoryState(
+        let history = ClipboardHistoryComposition.makeHistory(
             pasteboard: PasteboardClient(
                 pasteboard: pasteboard, readAccessBehavior: { .alwaysAllow },
                 foregroundApplication: {
@@ -207,6 +207,176 @@ struct ClipboardHistoryPolicyTests {
 
         history.dismissArchiveFailure()
         #expect(history.archiveFailure == nil)
+    }
+
+    @Test func `A paste waits for a replay cleanup that has already started`() async throws {
+        let fixture = try Fixture()
+        let entry = ClipboardEntry(
+            id: UUID(), text: "Document archivé", sourceBundleIdentifier: nil, lastUsedAt: .now,
+            kind: .files)
+        let (events, observed) = AsyncStream<ReplayEvent>.makeStream()
+        let (polls, polled) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let (cleanup, releaseCleanup) = AsyncStream<Void>.makeStream()
+        let store = ArchiveFixture(
+            cards: [entry], replayDirectory: fixture.directory.appending(path: "replays"),
+            replayEvents: observed, cleanupGate: cleanup)
+        var pasteRequested = false
+        var history: ClipboardHistoryState? = ClipboardHistoryComposition.makeHistory(
+            pasteboard: PasteboardClient(
+                pasteboard: fixture.pasteboard, readAccessBehavior: { .alwaysAllow },
+                foregroundApplication: {
+                    if pasteRequested { polled.yield(()) }
+                    return nil
+                }),
+            preferences: fixture.preferences, startsAutomatically: false)
+        weak var weakHistory = history
+        let timeout = Task {
+            try await Task.sleep(for: .seconds(10))
+            releaseCleanup.finish()
+            observed.finish()
+            polled.finish()
+        }
+        defer {
+            timeout.cancel()
+            releaseCleanup.finish()
+            observed.finish()
+            polled.finish()
+        }
+
+        var failure: (any Error)?
+        do {
+            try #require(history != nil)
+            var replayEvents = events.makeAsyncIterator()
+            var observedPolls = polls.makeAsyncIterator()
+            history?.startCollection(opening: { store })
+            _ = try await nextReplayEvent(in: &replayEvents) { $0 == .searched }
+
+            try fixture.copy("Copie qui déclenche le nettoyage")
+            _ = try await nextReplayEvent(in: &replayEvents) { $0 == .cleanupStarted(nil) }
+            pasteRequested = true
+            history?.paste(entry)
+            try #require(await observedPolls.next() != nil)
+            let waitingLog = await store.replayLog
+            #expect(
+                !waitingLog.contains { if case .preparationStarted = $0 { true } else { false } })
+
+            releaseCleanup.finish()
+            let preparation = try await nextReplayEvent(in: &replayEvents) {
+                if case .preparationStarted = $0 { true } else { false }
+            }
+            let replayID = try #require(preparation.startedReplayID)
+            _ = try await nextReplayEvent(in: &replayEvents) { $0 == .cleanupFinished(replayID) }
+            _ = try await nextReplayEvent(in: &replayEvents) { $0 == .markedUsed }
+            _ = try await nextReplayEvent(in: &replayEvents) { $0 == .searched }
+
+            let log = await store.replayLog
+            let cleaned = try #require(log.firstIndex(of: .cleanupFinished(nil)))
+            let prepared = try #require(log.firstIndex(of: .preparationStarted(replayID)))
+            #expect(cleaned < prepared)
+            let replayURL = try #require(await store.replayURL(for: replayID))
+            #expect(FileManager.default.fileExists(atPath: replayURL.path))
+            #expect(try Data(contentsOf: replayURL) == Data("Contenu archivé".utf8))
+            #expect(fixture.pasteboard.string(forType: .fileURL) == replayURL.absoluteString)
+        } catch {
+            failure = error
+        }
+
+        releaseCleanup.finish()
+        history = nil
+        await expectReleasedHistory { weakHistory == nil }
+        if let failure { throw failure }
+    }
+
+    @Test func `Collection continues while a file replay is being prepared`() async throws {
+        let fixture = try Fixture()
+        let entry = ClipboardEntry(
+            id: UUID(), text: "Document archivé", sourceBundleIdentifier: nil, lastUsedAt: .now,
+            kind: .files)
+        let (events, observed) = AsyncStream<ReplayEvent>.makeStream()
+        let (polls, polled) = AsyncStream<Int>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let (preparation, releasePreparation) = AsyncStream<Void>.makeStream()
+        let store = ArchiveFixture(
+            cards: [entry], replayDirectory: fixture.directory.appending(path: "replays"),
+            replayEvents: observed, preparationGate: preparation)
+        var history: ClipboardHistoryState? = ClipboardHistoryComposition.makeHistory(
+            pasteboard: PasteboardClient(
+                pasteboard: fixture.pasteboard, readAccessBehavior: { .alwaysAllow },
+                foregroundApplication: {
+                    polled.yield(fixture.pasteboard.changeCount)
+                    return nil
+                }),
+            preferences: fixture.preferences, startsAutomatically: false)
+        weak var weakHistory = history
+        let timeout = Task {
+            try await Task.sleep(for: .seconds(10))
+            releasePreparation.finish()
+            observed.finish()
+            polled.finish()
+        }
+        defer {
+            timeout.cancel()
+            releasePreparation.finish()
+            observed.finish()
+            polled.finish()
+        }
+
+        var failure: (any Error)?
+        do {
+            try #require(history != nil)
+            var replayEvents = events.makeAsyncIterator()
+            var observedPolls = polls.makeAsyncIterator()
+            history?.startCollection(opening: { store })
+            _ = try await nextReplayEvent(in: &replayEvents) { $0 == .searched }
+            history?.paste(entry)
+            let started = try await nextReplayEvent(in: &replayEvents) {
+                if case .preparationStarted = $0 { true } else { false }
+            }
+            let replayID = try #require(started.startedReplayID)
+            let replayURL = try #require(await store.replayURL(for: replayID))
+
+            let newerCopy = "Nouvelle copie pendant la préparation"
+            try fixture.copy(newerCopy)
+            let changeCount = fixture.pasteboard.changeCount
+            var sample = await observedPolls.next()
+            while let count = sample, count != changeCount { sample = await observedPolls.next() }
+            try #require(sample == changeCount)
+            _ = try await nextReplayEvent(in: &replayEvents) { $0 == .recorded(newerCopy) }
+            try #require(await observedPolls.next() == changeCount)
+
+            let preparingLog = await store.replayLog
+            #expect(!preparingLog.contains { if case .cleanupStarted = $0 { true } else { false } })
+            #expect(FileManager.default.fileExists(atPath: replayURL.path))
+            releasePreparation.finish()
+            _ = try await nextReplayEvent(in: &replayEvents) {
+                $0 == .preparationFinished(replayID)
+            }
+            #expect(fixture.pasteboard.changeCount == changeCount)
+            #expect(fixture.pasteboard.string(forType: .string) == newerCopy)
+        } catch {
+            failure = error
+        }
+
+        releasePreparation.finish()
+        history = nil
+        await expectReleasedHistory { weakHistory == nil }
+        if let failure { throw failure }
+    }
+
+    private func nextReplayEvent(
+        in events: inout AsyncStream<ReplayEvent>.Iterator,
+        matching predicate: (ReplayEvent) -> Bool
+    ) async throws -> ReplayEvent {
+        while let event = await events.next(isolation: #isolation) {
+            if predicate(event) { return event }
+        }
+        return try #require(nil as ReplayEvent?, "Le scénario de restitution n’a pas progressé.")
+    }
+
+    private func expectReleasedHistory(_ released: () -> Bool) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !released(), clock.now < deadline { await Task.yield() }
+        #expect(released(), "L’état et sa tâche de collage doivent être libérés au teardown.")
     }
 
     @Test func selectAllIncludesLaterPagesAndClearsPinnedSelection() async throws {
@@ -285,6 +455,29 @@ struct ClipboardHistoryPolicyTests {
         open.finish()
         try #require(try await waitUntil { history.visibleEntries.count == 2 })
         #expect(history.selectedIDs == [unpinned.id])
+    }
+
+    @Test func archivesRemainAccessibleWhenInitialCollectionsFail() async throws {
+        let fixture = try Fixture()
+        let history = fixture.relaunch()
+        let entry = ClipboardEntry(
+            id: UUID(), text: "Document archivé", sourceBundleIdentifier: nil, lastUsedAt: .now,
+            kind: .files)
+        let store = ArchiveFixture(
+            cards: [entry], rejectCollections: true,
+            replayDirectory: fixture.directory.appending(path: "replays"))
+        history.startCollection(opening: { store })
+        try #require(try await waitUntil { history.historyMessage != nil })
+
+        history.searchText = "Document"
+        try #require(try await waitUntil { history.visibleEntries == [entry] })
+        #expect(history.historyMessage?.key == "Impossible de charger les collections.")
+
+        history.paste(entry)
+        try #require(try await waitUntil { fixture.pasteboard.string(forType: .fileURL) != nil })
+        let urlString = try #require(fixture.pasteboard.string(forType: .fileURL))
+        let replayURL = try #require(URL(string: urlString))
+        #expect(try Data(contentsOf: replayURL) == Data("Contenu archivé".utf8))
     }
 
     @Test(arguments: [1, 3])
@@ -496,7 +689,7 @@ struct ClipboardHistoryPolicyTests {
         }
 
         func relaunch() -> ClipboardHistoryState {
-            ClipboardHistoryState(
+            ClipboardHistoryComposition.makeHistory(
                 pasteboard: PasteboardClient(
                     pasteboard: pasteboard, readAccessBehavior: { .alwaysAllow }),
                 preferences: preferences,
@@ -535,93 +728,6 @@ struct ClipboardHistoryPolicyTests {
                 fromPropertyList: info, format: .xml, options: 0)
             try data.write(to: contents.appending(path: "Info.plist"))
             return app
-        }
-    }
-
-    private struct ArchiveWrite: Sendable {
-        let text: String?
-        let date: Date
-    }
-
-    private actor ArchiveFixture: ClipboardHistoryStore {
-        private let writes: AsyncStream<ArchiveWrite>.Continuation?
-        private let gate: AsyncStream<Void>?
-        private let rejectFirstWrite: Bool
-        private var cards: [ClipboardEntry]
-        private let sampleThumbnails: [UUID: Data]
-        private let rejectFirstThumbnailBatch: Bool
-        private let deferArchiveCleanup: Bool
-        private(set) var startedCount = 0
-        private(set) var thumbnailBatches: [[UUID]] = []
-
-        init(
-            writes: AsyncStream<ArchiveWrite>.Continuation? = nil, gate: AsyncStream<Void>? = nil,
-            rejectFirstWrite: Bool = false, cards: [ClipboardEntry] = [],
-            sampleThumbnails: [UUID: Data] = [:], rejectFirstThumbnailBatch: Bool = false,
-            deferArchiveCleanup: Bool = false
-        ) {
-            self.writes = writes
-            self.gate = gate
-            self.rejectFirstWrite = rejectFirstWrite
-            self.cards = cards
-            self.sampleThumbnails = sampleThumbnails
-            self.rejectFirstThumbnailBatch = rejectFirstThumbnailBatch
-            self.deferArchiveCleanup = deferArchiveCleanup
-        }
-
-        func record(_ copy: ClipboardCopy, at date: Date) async throws {
-            startedCount += 1
-            writes?.yield(ArchiveWrite(text: copy.payload.plainText, date: date))
-            if startedCount == 1 {
-                if rejectFirstWrite {
-                    throw ClipboardHistoryStoreError.insufficientArchiveCapacity
-                }
-                if let gate {
-                    var resume = gate.makeAsyncIterator()
-                    _ = await resume.next()
-                }
-            }
-            cards.insert(
-                ClipboardEntry(
-                    id: UUID(), text: copy.payload.plainText ?? "", sourceBundleIdentifier: nil,
-                    lastUsedAt: date), at: 0)
-        }
-
-        func search(_ query: ClipboardHistoryQuery) -> ClipboardHistoryResults {
-            ClipboardHistoryResults(
-                entries: Array(cards.prefix(query.limit)),
-                matchingUnpinnedIDs: cards.filter { !$0.isPinned }.map(\.id), sourceIdentifiers: [],
-                mostRecentID: cards.first?.id, hasMoreEntries: cards.count > query.limit,
-                canClearHistory: !cards.isEmpty)
-        }
-        func thumbnails(for ids: [UUID]) throws -> [UUID: Data] {
-            thumbnailBatches.append(ids)
-            if rejectFirstThumbnailBatch && thumbnailBatches.count == 1 {
-                throw CocoaError(.fileReadUnknown)
-            }
-            return sampleThumbnails.filter { ids.contains($0.key) }
-        }
-        func indexNextPendingEntry() -> Bool { false }
-        func payload(for id: UUID) throws -> ClipboardPayload {
-            throw ClipboardHistoryStoreError.missingEntry
-        }
-        func previewSource(for id: UUID) -> ClipboardPreviewSource? { nil }
-        func prepareReplay(for ids: [UUID], replayID: UUID) throws -> ClipboardPayload {
-            throw ClipboardHistoryStoreError.missingEntry
-        }
-        func removeReplays(exceptKeeping replayID: UUID?) {}
-        func markUsed(ids: [UUID], at date: Date) {}
-        func collections() -> [ClipboardCollection] { [] }
-        func setPinned(_ isPinned: Bool, for entryID: UUID) {}
-        func createCollection(named name: String) {}
-        func setMembership(_ isMember: Bool, for entryID: UUID, in collectionID: UUID) {}
-        func deleteCollection(id: UUID) {}
-        func deleteEntries(ids: Set<UUID>, confirmingProtection: Bool) {}
-        func clearUnprotectedEntries() throws {
-            cards.removeAll { !$0.isProtected }
-            if deferArchiveCleanup {
-                throw ClipboardHistoryStoreError.archiveCleanupDeferred
-            }
         }
     }
 }

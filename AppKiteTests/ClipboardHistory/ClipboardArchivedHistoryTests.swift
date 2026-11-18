@@ -89,9 +89,8 @@ struct ClipboardArchivedHistoryTests {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }
         let client = PasteboardClient(pasteboard: board, readAccessBehavior: { .alwaysAllow })
-        let outcome = await PasteClipboardEntry(
-            pasteboard: client, pasteTarget: AppKitPasteTarget())(
-                payload: groupedText, target: nil, replacing: client.changeCount)
+        let outcome = await ClipboardHistoryComposition.makePaste(pasteboard: client)(
+            payload: groupedText, replacing: client.changeCount)
         #expect(outcome == .copied)
         #expect(board.string(forType: .string) == "Premier\nDeuxième")
 
@@ -191,10 +190,9 @@ struct ClipboardArchivedHistoryTests {
         let replayedFolder = try #require(replay.items.first?.fileURL)
         #expect(try Data(contentsOf: replayedFolder.appending(path: "Données.csv")) == values)
         #expect(replayedFolder != archived.items.first?.fileURL)
-        let pasted = await PasteClipboardEntry(
-            pasteboard: client, pasteTarget: AppKitPasteTarget())(
-                payload: replay, target: nil, replacing: client.changeCount
-            )
+        let pasted = await ClipboardHistoryComposition.makePaste(pasteboard: client)(
+            payload: replay, replacing: client.changeCount
+        )
         #expect(pasted == .copied)
         #expect(client.pollPayload() == nil)
         let pastedFiles = try #require(board.readObjects(forClasses: [NSURL.self]) as? [URL])

@@ -1,17 +1,10 @@
 import AppKit
 
 @MainActor
-final class PasteboardClient {
+final class PasteboardClient: ClipboardCollectionSource {
     struct ForegroundApplication: Equatable {
         let processIdentifier: pid_t
         let bundleIdentifier: String
-    }
-
-    enum ReadStatus {
-        case available
-        case denied
-        case failed
-        case invalidFileSelection
     }
 
     enum WriteResult {
@@ -44,7 +37,7 @@ final class PasteboardClient {
     private var lastForegroundApplication: ForegroundApplication?
     private var lastChangeCount: Int
     private var lastAccessBehavior: NSPasteboard.AccessBehavior
-    private var lastReadStatus = ReadStatus.available
+    private var lastReadStatus = ClipboardReadStatus.available
 
     init(
         pasteboard: NSPasteboard = .general,
@@ -72,7 +65,7 @@ final class PasteboardClient {
         lastReadStatus == .invalidFileSelection ? lastChangeCount : nil
     }
 
-    var readStatus: ReadStatus {
+    var readStatus: ClipboardReadStatus {
         if readAccessBehavior() == .alwaysDeny { return .denied }
         return lastReadStatus == .denied ? .available : lastReadStatus
     }
@@ -247,7 +240,7 @@ final class PasteboardClient {
         pasteboard.changeCount == changeCount
     }
 
-    private func noteReadFailure(_ status: ReadStatus = .failed, changeCount: Int) {
+    private func noteReadFailure(_ status: ClipboardReadStatus = .failed, changeCount: Int) {
         // AppKit's synchronous reads report failure as nil, with no per-read permission status.
         if canContinueReading(changeCount: changeCount) {
             lastReadStatus = status
