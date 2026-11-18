@@ -2,12 +2,12 @@ import SwiftUI
 
 #if DEBUG
     #Preview("Bandeau Liquid Glass", traits: .fixedLayout(width: 1_680, height: 300)) {
-        ClipboardHistoryView(history: .preview)
+        ClipboardHistoryView(history: ClipboardHistoryComposition.makePreview())
             .environment(\.locale, Locale(identifier: "fr_FR"))
     }
 
     #Preview("Bandeau compact", traits: .fixedLayout(width: 780, height: 300)) {
-        ClipboardHistoryView(history: .preview)
+        ClipboardHistoryView(history: ClipboardHistoryComposition.makePreview())
             .environment(\.locale, Locale(identifier: "fr_FR"))
     }
 
@@ -21,7 +21,7 @@ import SwiftUI
                 ],
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
-            ClipboardHistoryView(history: .preview)
+            ClipboardHistoryView(history: ClipboardHistoryComposition.makePreview())
                 .environment(\.locale, Locale(identifier: "fr_FR"))
                 .frame(height: ClipboardHistoryView.preferredHeight)
                 .padding(.horizontal, 12)

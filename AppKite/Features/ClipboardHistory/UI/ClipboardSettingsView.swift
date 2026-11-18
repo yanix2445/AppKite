@@ -152,6 +152,6 @@ private struct ClipboardCollectionRepairView: View {
 
 #if DEBUG
     #Preview("Réglages du presse-papiers") {
-        ClipboardSettingsView(history: .preview)
+        ClipboardSettingsView(history: ClipboardHistoryComposition.makePreview())
     }
 #endif

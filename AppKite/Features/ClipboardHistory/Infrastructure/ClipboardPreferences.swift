@@ -1,29 +1,7 @@
 import Foundation
 
-enum ClipboardCollectionPause: Codable, Equatable {
-    case manual
-    case until(Date)
-
-    func isActive(at date: Date) -> Bool {
-        switch self {
-        case .manual: true
-        case .until(let deadline): date < deadline
-        }
-    }
-}
-
-struct ClipboardExcludedApplication: Codable, Equatable, Identifiable {
-    let id: String
-    let name: String
-}
-
 @MainActor
 struct ClipboardPreferences {
-    enum CollectionSetting: Hashable {
-        case pause
-        case exclusions
-    }
-
     private enum ReadError: Error {
         case invalidData
     }

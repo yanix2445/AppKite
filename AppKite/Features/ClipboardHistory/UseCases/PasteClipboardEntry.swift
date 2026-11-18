@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 
 @MainActor
 struct PasteClipboardEntry {
@@ -9,37 +9,37 @@ struct PasteClipboardEntry {
         case clipboardChanged
     }
 
-    let pasteboard: PasteboardClient
-    let pasteTarget: AppKitPasteTarget
+    enum WriteResult {
+        case written(Int)
+        case changed
+        case failed
+    }
+
+    let write: @MainActor (ClipboardPayload, Int) -> WriteResult
+    let isCurrent: @MainActor (Int) -> Bool
+    let send: @MainActor (@escaping @MainActor () -> Bool) async -> Bool
 
     func callAsFunction(
-        text: String, target: NSRunningApplication?, replacing expectedChangeCount: Int
+        text: String, replacing expectedChangeCount: Int
     ) async -> Outcome {
-        await callAsFunction(
-            payload: .plainText(text), target: target, replacing: expectedChangeCount)
+        await callAsFunction(payload: .plainText(text), replacing: expectedChangeCount)
     }
 
     func callAsFunction(
-        payload: ClipboardPayload, target: NSRunningApplication?, replacing expectedChangeCount: Int
+        payload: ClipboardPayload, replacing expectedChangeCount: Int
     ) async -> Outcome {
         guard !Task.isCancelled else { return .failed }
         let changeCount: Int
-        switch pasteboard.write(payload, replacing: expectedChangeCount) {
+        switch write(payload, expectedChangeCount) {
         case .written(let count): changeCount = count
         case .changed: return .clipboardChanged
         case .failed: return .failed
         }
 
-        if let target,
-            await pasteTarget.postPaste(
-                to: target,
-                whileClipboardIsCurrent: {
-                    pasteboard.isCurrent(changeCount: changeCount)
-                })
-        {
+        if await send({ self.isCurrent(changeCount) }) {
             return .sent
         }
 
-        return pasteboard.isCurrent(changeCount: changeCount) ? .copied : .clipboardChanged
+        return isCurrent(changeCount) ? .copied : .clipboardChanged
     }
 }

@@ -15,11 +15,16 @@ final class ClipboardPreviewRequests {
     }
 
     private(set) var results: [UUID: Result] = [:]
+    @ObservationIgnored private let render: RenderClipboardPreview
     @ObservationIgnored private var visible: [UUID: Request] = [:]
     @ObservationIgnored private var waiting: [UUID] = []
     @ObservationIgnored private var jobs: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var cacheOrder: [UUID] = []
     @ObservationIgnored private var cacheBytes = 0
+
+    init(render: @escaping RenderClipboardPreview) {
+        self.render = render
+    }
 
     isolated deinit {
         for job in jobs.values { job.cancel() }
@@ -70,8 +75,8 @@ final class ClipboardPreviewRequests {
             let id = waiting.removeFirst()
             guard let request = visible[id], jobs[id] == nil, results[id] == nil else { continue }
 
-            jobs[id] = Task { [weak self] in
-                let result = await Self.load(request)
+            jobs[id] = Task { [weak self, render] in
+                let result = await Self.load(request, render: render)
                 guard let self else { return }
                 self.jobs.removeValue(forKey: id)
                 if self.visible[id] != nil {
@@ -86,19 +91,19 @@ final class ClipboardPreviewRequests {
         }
     }
 
-    private static func load(_ request: Request) async -> Result {
+    private static func load(_ request: Request, render: @escaping RenderClipboardPreview) async
+        -> Result
+    {
         do {
             guard let source = try await request.store.previewSource(for: request.entry.id) else {
                 return .summary
             }
             try Task.checkCancellation()
-            let render = Task.detached(priority: .utility) {
-                await ClipboardPreviewRenderer.render(source, media: ClipboardMediaPreview.render)
-            }
+            let rendering = Task.detached(priority: .utility) { await render(source) }
             let preview = await withTaskCancellationHandler {
-                await render.value
+                await rendering.value
             } onCancel: {
-                render.cancel()
+                rendering.cancel()
             }
             return preview.map(Result.ready) ?? .summary
         } catch is CancellationError {

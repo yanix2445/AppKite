@@ -18,9 +18,14 @@ struct ClipboardHistoryCardView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            preview
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
+            ClipboardCardPreviewView(
+                entryID: entry.id, kind: entry.kind, text: entry.text,
+                tablePreviewRows: entry.tablePreviewRows, thumbnail: thumbnail,
+                archivedPreview: archivedPreview, isLoadingPreview: isLoadingPreview,
+                playback: playback, swatch: entry.kind == .color ? swatch : nil
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
             footer
         }
         .frame(width: Self.width, height: height)
@@ -107,84 +112,6 @@ struct ClipboardHistoryCardView: View {
         case .audio: "Audio"
         case .video: "Vidéo"
         case nil: entry.kind.cardHeaderTitle
-        }
-    }
-
-    @ViewBuilder
-    private var preview: some View {
-        if let archivedPreview {
-            let active = playback?.activeID == entry.id ? playback : nil
-            ClipboardArchivedPreviewView(preview: archivedPreview, playback: active)
-                .accessibilityIdentifier("clipboard-archive-preview")
-        } else if isLoadingPreview && thumbnail == nil && entry.tablePreviewRows.isEmpty {
-            ProgressView("Chargement de l’aperçu")
-                .controlSize(.small)
-                .labelStyle(.iconOnly)
-        } else if entry.kind == .pdf, let thumbnail, let image = NSImage(data: thumbnail) {
-            VStack(spacing: 5) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.primary.opacity(0.06), in: .rect(cornerRadius: 7))
-                    .accessibilityHidden(true)
-                if entry.text != "PDF" {
-                    Text(verbatim: entry.text)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                }
-            }
-            .padding(9)
-        } else if let thumbnail, let image = NSImage(data: thumbnail) {
-            GeometryReader { proxy in
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-            }
-            .padding(entry.kind == .image ? 0 : 9)
-            .accessibilityLabel(Text(verbatim: entry.text))
-        } else if entry.kind == .color, let color = swatch {
-            ZStack {
-                color
-                Text(verbatim: entry.text)
-                    .font(.system(.caption, design: .monospaced).weight(.medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .foregroundStyle(.black)
-                    .background(.white.opacity(0.9), in: .rect(cornerRadius: 7))
-            }
-        } else if entry.kind == .files || entry.kind == .pdf || entry.kind == .image {
-            VStack(spacing: 6) {
-                Image(systemName: entry.kind.symbol)
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                Text(verbatim: String(entry.text.prefix(400)))
-                    .font(.callout.weight(.medium))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(3)
-            }
-            .padding(8)
-        } else if entry.kind == .spreadsheet, !entry.tablePreviewRows.isEmpty {
-            ClipboardTablePreviewView(rows: entry.tablePreviewRows)
-        } else if entry.kind == .link, let url = URL(string: entry.text), let host = url.host {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(verbatim: host).font(.callout.weight(.semibold))
-                Text(verbatim: url.path.isEmpty ? entry.text : url.path)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(10)
-        } else {
-            Text(verbatim: String(entry.text.prefix(600)))
-                .font(.system(size: 13, weight: entry.kind == .richText ? .medium : .regular))
-                .lineSpacing(2)
-                .lineLimit(5)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(10)
         }
     }
 
@@ -298,6 +225,96 @@ struct ClipboardHistoryCardView: View {
             green: Double((rgba >> 16) & 255) / 255, blue: Double((rgba >> 8) & 255) / 255,
             opacity: Double(rgba & 255) / 255
         )
+    }
+}
+
+private struct ClipboardCardPreviewView: View {
+    let entryID: UUID
+    let kind: ClipboardPayload.Kind
+    let text: String
+    let tablePreviewRows: [[String]]
+    let thumbnail: Data?
+    let archivedPreview: ClipboardPreview?
+    let isLoadingPreview: Bool
+    let playback: ClipboardPreviewPlayback?
+    let swatch: Color?
+
+    @ViewBuilder
+    var body: some View {
+        if let archivedPreview {
+            let active = playback?.activeID == entryID ? playback : nil
+            ClipboardArchivedPreviewView(preview: archivedPreview, playback: active)
+                .accessibilityIdentifier("clipboard-archive-preview")
+        } else if isLoadingPreview && thumbnail == nil && tablePreviewRows.isEmpty {
+            ProgressView("Chargement de l’aperçu")
+                .controlSize(.small)
+                .labelStyle(.iconOnly)
+        } else if kind == .pdf, let thumbnail, let image = NSImage(data: thumbnail) {
+            VStack(spacing: 5) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.primary.opacity(0.06), in: .rect(cornerRadius: 7))
+                    .accessibilityHidden(true)
+                if text != "PDF" {
+                    Text(verbatim: text)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                }
+            }
+            .padding(9)
+        } else if let thumbnail, let image = NSImage(data: thumbnail) {
+            GeometryReader { proxy in
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+            }
+            .padding(kind == .image ? 0 : 9)
+            .accessibilityLabel(Text(verbatim: text))
+        } else if kind == .color, let color = swatch {
+            ZStack {
+                color
+                Text(verbatim: text)
+                    .font(.system(.caption, design: .monospaced).weight(.medium))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .foregroundStyle(.black)
+                    .background(.white.opacity(0.9), in: .rect(cornerRadius: 7))
+            }
+        } else if kind == .files || kind == .pdf || kind == .image {
+            VStack(spacing: 6) {
+                Image(systemName: kind.symbol)
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text(verbatim: String(text.prefix(400)))
+                    .font(.callout.weight(.medium))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+            }
+            .padding(8)
+        } else if kind == .spreadsheet, !tablePreviewRows.isEmpty {
+            ClipboardTablePreviewView(rows: tablePreviewRows)
+        } else if kind == .link, let url = URL(string: text), let host = url.host {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(verbatim: host).font(.callout.weight(.semibold))
+                Text(verbatim: url.path.isEmpty ? text : url.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(10)
+        } else {
+            Text(verbatim: String(text.prefix(600)))
+                .font(.system(size: 13, weight: kind == .richText ? .medium : .regular))
+                .lineSpacing(2)
+                .lineLimit(5)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(10)
+        }
     }
 }
 
